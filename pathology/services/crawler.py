@@ -72,21 +72,42 @@ class CAPCrawler:
 
         return downloaded_files
 
-    def _fetch_page_html(self) -> str:
-        from playwright.sync_api import sync_playwright
+    # def _fetch_page_html(self) -> str:
+    #     from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                headless=self.headless,
-                chromium_sandbox=False,
-                args=["--disable-setuid-sandbox", "--no-sandbox"],
-            )
-            page = browser.new_page()
-            page.goto(self.base_url, wait_until="networkidle", timeout=120000)
-            page.wait_for_timeout(2000)
-            html = page.content()
-            browser.close()
-        return html
+    #     with sync_playwright() as playwright:
+    #         browser = playwright.chromium.launch(
+    #             headless=self.headless,
+    #             chromium_sandbox=False,
+    #             args=["--disable-setuid-sandbox", "--no-sandbox"],
+    #         )
+    #         page = browser.new_page()
+    #         page.goto(self.base_url, wait_until="networkidle", timeout=120000)
+    #         page.wait_for_timeout(2000)
+    #         html = page.content()
+    #         browser.close()
+    #     return html
+
+    def _fetch_page_html(self) -> str:
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=self.headless,
+                    args=["--no-sandbox", "--disable-setuid-sandbox"],
+                )
+                page = browser.new_page()
+                page.goto(self.base_url, wait_until="networkidle", timeout=120000)
+                html = page.content()
+                browser.close()
+                return html
+
+        except Exception as e:
+            logger.exception("Playwright failed, falling back to requests: %s", e)
+            response = requests.get(self.base_url, timeout=60)
+            response.raise_for_status()
+            return response.text
 
     def _parse_links_from_html(self, soup: BeautifulSoup) -> list[ProtocolDocumentLink]:
         documents: list[ProtocolDocumentLink] = []
