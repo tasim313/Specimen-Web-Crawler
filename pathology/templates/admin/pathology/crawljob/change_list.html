@@ -1,0 +1,16 @@
+{% extends "admin/change_list.html" %}
+
+{% block content_title %}
+  <h1>Crawl Jobs</h1>
+  <p style="margin-top:8px;color:#57606a;">
+    Use <strong>Open Monitor</strong> to watch a crawl job live. The live monitor URL is under
+    <code>/admin/pathology/crawljob/monitor/</code>, not a Python file path.
+  </p>
+{% endblock %}
+
+{% block object-tools-items %}
+  <li>
+    <a href="{% url 'admin:pathology_crawljob_monitor_index' %}">Live Monitor</a>
+  </li>
+  {{ block.super }}
+{% endblock %}

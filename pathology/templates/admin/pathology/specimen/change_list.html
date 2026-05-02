@@ -1,0 +1,8 @@
+{% extends "admin/change_list.html" %}
+
+{% block object-tools-items %}
+  <li>
+    <a href="{% url 'admin:pathology_specimen_cursor_browser' %}">Cursor Browser</a>
+  </li>
+  {{ block.super }}
+{% endblock %}

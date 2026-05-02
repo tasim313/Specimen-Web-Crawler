@@ -1,0 +1,59 @@
+{% extends "admin/base_site.html" %}
+
+{% block extrastyle %}
+<style>
+  .browser-card { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px; }
+  .browser-table { width: 100%; border-collapse: collapse; }
+  .browser-table th, .browser-table td { padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: left; }
+  .browser-nav { display: flex; gap: 12px; margin-top: 16px; }
+  .browser-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="browser-card">
+  <div class="browser-top">
+    <div>
+      <h1>{{ title }}</h1>
+      <p>Unlimited browsing with cursor-based and keyset pagination.</p>
+    </div>
+    <div><a href="{{ changelist_url }}">Back to Default Admin List</a></div>
+  </div>
+
+  <table class="browser-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Organ Name</th>
+        <th>Specimen Name</th>
+        <th>Specimen Type</th>
+        <th>Specimen Size</th>
+        <th>Source File</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for specimen in page.items %}
+      <tr>
+        <td>{{ specimen.id }}</td>
+        <td>{{ specimen.organ.name }}</td>
+        <td>{{ specimen.specimen_name }}</td>
+        <td>{{ specimen.specimen_type }}</td>
+        <td>{{ specimen.specimen_size }}</td>
+        <td>{{ specimen.source_file }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="6">No specimen data found.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="browser-nav">
+    {% if page.prev_cursor %}
+      <a href="?before={{ page.prev_cursor }}&page_size={{ page_size }}">Previous Page</a>
+    {% endif %}
+    {% if page.next_cursor %}
+      <a href="?after={{ page.next_cursor }}&page_size={{ page_size }}">Next Page</a>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

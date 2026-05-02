@@ -1,0 +1,42 @@
+{% extends "admin/base_site.html" %}
+
+{% block extrastyle %}
+<style>
+  .monitor-grid { display: grid; gap: 16px; }
+  .monitor-card { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .stat { background: #f6f8fa; border-radius: 6px; padding: 12px; }
+  .stat-label { font-size: 12px; text-transform: uppercase; color: #57606a; }
+  .stat-value { font-size: 24px; font-weight: 700; }
+  .links { display: flex; gap: 16px; margin-bottom: 12px; }
+</style>
+<meta http-equiv="refresh" content="5">
+{% endblock %}
+
+{% block content %}
+<div class="monitor-grid">
+  <div class="monitor-card">
+    <div class="links">
+      <a href="{{ changelist_url }}">Back to Crawl Jobs</a>
+      <a href="{{ change_url }}">Edit This Job</a>
+    </div>
+    <h1>{{ title }}</h1>
+    <p>This page refreshes every 5 seconds.</p>
+    <div class="stats-grid">
+      <div class="stat"><div class="stat-label">Status</div><div class="stat-value">{{ job.get_status_display }}</div></div>
+      <div class="stat"><div class="stat-label">Links</div><div class="stat-value">{{ job.total_links }}</div></div>
+      <div class="stat"><div class="stat-label">Files</div><div class="stat-value">{{ job.files_downloaded }}</div></div>
+      <div class="stat"><div class="stat-label">Created</div><div class="stat-value">{{ job.records_created }}</div></div>
+      <div class="stat"><div class="stat-label">Updated</div><div class="stat-value">{{ job.records_updated }}</div></div>
+      <div class="stat"><div class="stat-label">Skipped</div><div class="stat-value">{{ job.records_skipped }}</div></div>
+    </div>
+    <p><strong>Limit:</strong> {{ job.limit|default:"All available documents" }}</p>
+    <p><strong>Destination:</strong> {{ job.destination_dir|default:"Default data directory" }}</p>
+    <p><strong>Started:</strong> {{ job.started_at|default:"-" }}</p>
+    <p><strong>Finished:</strong> {{ job.finished_at|default:"-" }}</p>
+    {% if job.error_message %}
+      <p><strong>Error:</strong> {{ job.error_message }}</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

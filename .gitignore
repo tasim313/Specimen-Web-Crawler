@@ -1,0 +1,101 @@
+# ==============================
+
+# Django .gitignore (Production Grade)
+
+# ==============================
+
+# 🔐 Environment Variables
+
+.env
+.env.*
+*.env
+
+# 🐍 Python
+
+**pycache**/
+*.py[cod]
+*$py.class
+*.so
+
+# 📦 Virtual Environment
+
+venv/
+env/
+ENV/
+.venv/
+
+# 🗄️ SQLite Database
+
+db.sqlite3
+db.sqlite3-journal
+
+# 📁 Media Files (User uploads)
+
+media/
+uploads/
+
+# 📄 Static files (optional, if collected)
+
+staticfiles/
+
+# 🧾 Logs
+
+logs/
+*.log
+
+# 📊 Coverage / Testing
+
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+
+# 🧪 Django stuff
+
+*.pot
+*.mo
+*.pyc
+
+# 🔧 Migrations (optional – be careful)
+
+# Uncomment only if you manage migrations differently
+
+# */migrations/*
+
+# !*/migrations/**init**.py
+
+# 🧰 IDE / Editor
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 🐳 Docker
+
+docker-compose.override.yml
+
+# 🧹 OS Files
+
+.DS_Store
+Thumbs.db
+
+# 🔑 Secret keys / certificates
+
+*.pem
+*.key
+
+# 📦 Build / dist
+
+build/
+dist/
+*.egg-info/
+
+# 🧠 Celery / Redis (if used later)
+
+celerybeat-schedule
+
+# 🧾 Backup files
+
+*.bak
+*.backup

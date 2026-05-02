@@ -1,0 +1,50 @@
+{% extends "admin/base_site.html" %}
+
+{% block extrastyle %}
+<style>
+  .monitor-grid { display: grid; gap: 16px; }
+  .monitor-card { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px; }
+  .monitor-table { width: 100%; border-collapse: collapse; }
+  .monitor-table th, .monitor-table td { padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: left; }
+</style>
+<meta http-equiv="refresh" content="5">
+{% endblock %}
+
+{% block content %}
+<div class="monitor-grid">
+  <div class="monitor-card">
+    <h1>{{ title }}</h1>
+    <p>This page refreshes every 5 seconds.</p>
+    <table class="monitor-table">
+      <thead>
+        <tr>
+          <th>Job</th>
+          <th>Status</th>
+          <th>Links</th>
+          <th>Files</th>
+          <th>Created</th>
+          <th>Updated</th>
+          <th>Skipped</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for job in jobs %}
+        <tr>
+          <td>{{ job.name|default:"Crawl Job" }} #{{ job.id }}</td>
+          <td>{{ job.get_status_display }}</td>
+          <td>{{ job.total_links }}</td>
+          <td>{{ job.files_downloaded }}</td>
+          <td>{{ job.records_created }}</td>
+          <td>{{ job.records_updated }}</td>
+          <td>{{ job.records_skipped }}</td>
+          <td><a href="{% url 'admin:pathology_crawljob_monitor' job.id %}">Monitor</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8">No crawl jobs found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
