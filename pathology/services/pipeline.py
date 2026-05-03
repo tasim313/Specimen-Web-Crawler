@@ -54,19 +54,25 @@ class ProtocolIngestionPipeline:
         if should_stop and should_stop():
             raise CrawlStopped("Crawl was stopped before downloading documents.")
 
-        files = self.crawler.download_documents(
-            links,
-            destination_root=destination_root or settings.DATA_DIR,
-            should_stop=should_stop,
-        )
-
         created = 0
         updated = 0
         skipped = 0
+        files_downloaded = 0
+        seen_destinations: set[Path] = set()
 
-        for file_path in files:
+        for document in links:
             if should_stop and should_stop():
                 raise CrawlStopped("Crawl was stopped while processing documents.")
+            file_path = self.crawler.download_document(
+                document,
+                destination_root=destination_root or settings.DATA_DIR,
+                should_stop=should_stop,
+                seen_destinations=seen_destinations,
+            )
+            if file_path is None:
+                continue
+
+            files_downloaded += 1
             category = file_path.parent.name
             parsed = parse_document(Path(file_path), category)
             if not parsed:
@@ -74,7 +80,7 @@ class ProtocolIngestionPipeline:
                 emit(
                     {
                         "links": len(links),
-                        "files": len(files),
+                        "files": files_downloaded,
                         "created": created,
                         "updated": updated,
                         "skipped": skipped,
@@ -93,7 +99,7 @@ class ProtocolIngestionPipeline:
             emit(
                 {
                     "links": len(links),
-                    "files": len(files),
+                    "files": files_downloaded,
                     "created": created,
                     "updated": updated,
                     "skipped": skipped,
@@ -102,7 +108,7 @@ class ProtocolIngestionPipeline:
 
         return {
             "links": len(links),
-            "files": len(files),
+            "files": files_downloaded,
             "created": created,
             "updated": updated,
             "skipped": skipped,

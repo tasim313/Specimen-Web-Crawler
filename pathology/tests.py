@@ -1,10 +1,12 @@
 from pathlib import Path
 from unittest.mock import patch
 
+from bs4 import BeautifulSoup
 from django.test import TestCase
 
 from pathology.models import CrawlJob, Organ, Specimen
-from pathology.services.jobs import CrawlJobService
+from pathology.services.crawler import CAPCrawler
+from pathology.services.jobs import CrawlJobService, start_default_job_if_needed
 from pathology.services.normalizers import (
     build_specimen_name,
     infer_organ_name,
@@ -13,7 +15,7 @@ from pathology.services.normalizers import (
 )
 from pathology.services.pagination import paginate_keyset
 from pathology.services.pipeline import ProtocolIngestionPipeline
-from pathology.services.types import ParsedSpecimenData
+from pathology.services.types import ParsedSpecimenData, ProtocolDocumentLink
 
 
 class NormalizerTests(TestCase):
@@ -47,6 +49,66 @@ class NormalizerTests(TestCase):
         )
 
 
+class CrawlerParsingTests(TestCase):
+    def test_parser_prefers_current_version_links_from_live_page_structure(self):
+        html = """
+        <h2>Cancer Reporting and Biomarker Reporting Protocols</h2>
+        <h3>Breast</h3>
+        <p>Breast DCIS, Resection Current Version</p>
+        <a href="https://documents.cap.org/protocols/Breast.DCIS_4.4.0.0.REL_CAPCP.pdf">PDF</a>
+        <a href="https://documents.cap.org/protocols/Breast.DCIS_4.4.0.0.REL_CAPCP.docx">Word</a>
+        <p>June 2021 Previous Version</p>
+        <a href="https://documents.cap.org/protocols/Breast.DCIS_4.3.0.2.REL_CAPCP.pdf">2020</a>
+        <h3>Endocrine</h3>
+        <p>Thyroid Current Version</p>
+        <a href="/protocols/thyroid-current.pdf">PDF</a>
+        <a href="/protocols/thyroid-current.docx">Word</a>
+        """
+        crawler = CAPCrawler(base_url="https://www.cap.org/path/")
+
+        documents = crawler._parse_links_from_html(BeautifulSoup(html, "html.parser"))
+
+        self.assertEqual(len(documents), 4)
+        self.assertEqual(documents[0].category, "Breast")
+        self.assertEqual(documents[0].protocol_name, "Breast DCIS, Resection")
+        self.assertTrue(documents[0].file_url.endswith(".pdf"))
+        self.assertEqual(documents[1].file_type, "docx")
+        self.assertEqual(documents[2].category, "Endocrine")
+        self.assertEqual(
+            documents[2].file_url,
+            "https://www.cap.org/protocols/thyroid-current.pdf",
+        )
+
+    def test_download_documents_only_returns_each_destination_once(self):
+        crawler = CAPCrawler()
+        documents = [
+            ProtocolDocumentLink(
+                category="Breast",
+                protocol_name="Breast DCIS, Resection",
+                file_url="https://documents.cap.org/protocols/breast-current.pdf",
+                file_type="pdf",
+            ),
+            ProtocolDocumentLink(
+                category="Breast",
+                protocol_name="Breast DCIS, Resection",
+                file_url="https://documents.cap.org/protocols/breast-old.pdf",
+                file_type="pdf",
+            ),
+        ]
+
+        with patch("pathology.services.crawler.time.sleep"), patch.object(
+            crawler,
+            "_download_file",
+        ) as mock_download:
+            downloaded = crawler.download_documents(
+                documents,
+                destination_root=Path("tmp"),
+            )
+
+        self.assertEqual(len(downloaded), 1)
+        self.assertEqual(mock_download.call_count, 1)
+
+
 class PipelinePersistenceTests(TestCase):
     def test_upsert_uses_source_file_for_idempotency(self):
         pipeline = ProtocolIngestionPipeline(crawler=None)
@@ -76,6 +138,70 @@ class PipelinePersistenceTests(TestCase):
             Specimen.objects.get().source_file.endswith(".docx")
         )
 
+    @patch("pathology.services.pipeline.parse_document")
+    def test_pipeline_inserts_while_crawl_is_running(self, mock_parse_document):
+        class StubCrawler:
+            def collect_document_links(self):
+                return [
+                    ProtocolDocumentLink(
+                        category="Breast",
+                        protocol_name="Breast DCIS, Resection",
+                        file_url="https://example.com/breast_dcis_resection.docx",
+                        file_type="docx",
+                    ),
+                    ProtocolDocumentLink(
+                        category="Endocrine",
+                        protocol_name="Thyroid",
+                        file_url="https://example.com/thyroid.docx",
+                        file_type="docx",
+                    ),
+                ]
+
+            def download_document(
+                self,
+                document,
+                *,
+                destination_root=None,
+                should_stop=None,
+                seen_destinations=None,
+            ):
+                destination_root = destination_root or Path("data")
+                destination = (
+                    destination_root
+                    / document.category.lower().replace(" ", "_")
+                    / f"{document.protocol_name.lower().replace(', ', '_').replace(' ', '_')}.docx"
+                )
+                if seen_destinations is not None:
+                    seen_destinations.add(destination)
+                return destination
+
+        pipeline = ProtocolIngestionPipeline(crawler=StubCrawler())
+        mock_parse_document.side_effect = [
+            ParsedSpecimenData(
+                specimen_name="Breast DCIS resection specimen",
+                organ_name="Breast",
+                specimen_type="Resection",
+                specimen_size="Large",
+                source_file=Path("data/breast/breast_dcis_resection.docx"),
+            ),
+            ParsedSpecimenData(
+                specimen_name="Thyroid specimen",
+                organ_name="Thyroid",
+                specimen_type="Unknown",
+                specimen_size="",
+                source_file=Path("data/endocrine/thyroid.docx"),
+            ),
+        ]
+        progress = []
+
+        summary = pipeline.run(progress_callback=lambda item: progress.append(item.copy()))
+
+        self.assertEqual(summary["created"], 2)
+        self.assertEqual(Organ.objects.count(), 2)
+        self.assertEqual(Specimen.objects.count(), 2)
+        self.assertTrue(any(item["created"] == 1 for item in progress))
+        self.assertTrue(any(item["created"] == 2 for item in progress))
+
 
 class CrawlJobTests(TestCase):
     @patch("pathology.services.jobs.subprocess.Popen")
@@ -101,6 +227,39 @@ class CrawlJobTests(TestCase):
         job.refresh_from_db()
         self.assertTrue(job.stop_requested)
         self.assertEqual(job.status, CrawlJob.Status.STOP_REQUESTED)
+
+    @patch("pathology.services.jobs.CrawlJobService.start_job")
+    def test_auto_start_creates_unlimited_default_job_when_empty(self, mock_start_job):
+        mock_start_job.side_effect = lambda job: job
+
+        job = start_default_job_if_needed()
+
+        self.assertIsNotNone(job)
+        created_job = CrawlJob.objects.get(name="Automatic CAP Crawl")
+        self.assertIsNone(created_job.limit)
+        self.assertTrue(created_job.destination_dir.endswith("/data"))
+        mock_start_job.assert_called_once_with(created_job)
+
+    @patch("pathology.services.jobs.CrawlJobService.start_job")
+    def test_auto_start_skips_completed_job_when_specimens_exist(self, mock_start_job):
+        organ = Organ.objects.create(name="Breast")
+        Specimen.objects.create(
+            organ=organ,
+            specimen_name="Breast specimen",
+            specimen_type="Biopsy",
+            specimen_size="Small",
+            source_file="breast/specimen.docx",
+        )
+        CrawlJob.objects.create(
+            name="Automatic CAP Crawl",
+            status=CrawlJob.Status.COMPLETED,
+            destination_dir="data",
+        )
+
+        job = start_default_job_if_needed()
+
+        self.assertIsNone(job)
+        mock_start_job.assert_not_called()
 
 
 class KeysetPaginationTests(TestCase):
