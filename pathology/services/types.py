@@ -10,12 +10,16 @@ class ProtocolDocumentLink:
     protocol_name: str
     file_url: str
     file_type: str
+    source_site: str = "cap.org"
 
 
 @dataclass(slots=True)
 class ParsedSpecimenData:
     specimen_name: str
     organ_name: str
+    site_name: str
+    laterality: str
     specimen_type: str
     specimen_size: str
+    source_site: str
     source_file: Path

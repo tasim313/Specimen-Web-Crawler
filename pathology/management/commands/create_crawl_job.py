@@ -12,10 +12,17 @@ class Command(BaseCommand):
         parser.add_argument("--name", type=str, default="")
         parser.add_argument("--limit", type=int, default=None)
         parser.add_argument("--destination", type=str, default="")
+        parser.add_argument(
+            "--source",
+            type=str,
+            default=CrawlJob.SourceChoices.CAP,
+            choices=CrawlJob.SourceChoices.values,
+        )
 
     def handle(self, *args, **options):
         job = CrawlJob.objects.create(
             name=options["name"],
+            crawl_source=options["source"],
             limit=options["limit"],
             destination_dir=options["destination"],
         )

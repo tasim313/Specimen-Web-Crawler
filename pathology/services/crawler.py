@@ -17,7 +17,13 @@ from .types import ProtocolDocumentLink
 logger = logging.getLogger("pathology.crawler")
 
 
+class SourceUnavailable(RuntimeError):
+    """Raised when an upstream source cannot be crawled from this environment."""
+
+
 class CAPCrawler:
+    source_site = "cap.org"
+
     def __init__(self, base_url: str | None = None, headless: bool = True):
         self.base_url = base_url or settings.CAP_PROTOCOL_INDEX_URL
         self.headless = headless
@@ -203,6 +209,7 @@ class CAPCrawler:
                     protocol_name=current_protocol,
                     file_url=file_url,
                     file_type=file_type,
+                    source_site=self.source_site,
                 )
             )
 
@@ -243,6 +250,7 @@ class CAPCrawler:
                             protocol_name=protocol_name,
                             file_url=file_url,
                             file_type=file_type,
+                            source_site=self.source_site,
                         )
                     )
 
@@ -273,3 +281,64 @@ class CAPCrawler:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     handle.write(chunk)
+
+
+class PathologyOutlinesCrawler:
+    source_site = "pathologyoutlines.com"
+
+    def __init__(self, sitemap_url: str | None = None):
+        self.sitemap_url = sitemap_url or settings.PATHOLOGY_OUTLINES_SITEMAP_URL
+
+    def ensure_crawlable(self) -> None:
+        sitemap_html = self._fetch_html(self.sitemap_url)
+        if "503 Service Unavailable" in sitemap_html:
+            raise SourceUnavailable(
+                "Pathology Outlines returned 503 at sitemap page; source is blocked from this environment."
+            )
+
+        chapter_url = self._first_chapter_url(BeautifulSoup(sitemap_html, "html.parser"))
+        if not chapter_url:
+            raise SourceUnavailable(
+                "Pathology Outlines sitemap did not expose chapter links that can be crawled."
+            )
+
+        chapter_html = self._fetch_html(chapter_url)
+        if "503 Service Unavailable" in chapter_html:
+            raise SourceUnavailable(
+                "Pathology Outlines chapter content returned 503; source is blocked from this environment."
+            )
+
+        raise SourceUnavailable(
+            "Pathology Outlines is reachable, but topic extraction is not implemented yet for this site."
+        )
+
+    def _fetch_html(self, url: str) -> str:
+        response = requests.get(
+            url,
+            timeout=60,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Safari/537.36"
+                )
+            },
+        )
+        response.raise_for_status()
+        return response.text
+
+    def _first_chapter_url(self, soup: BeautifulSoup) -> str:
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"]
+            if not href.startswith("https://www.pathologyoutlines.com/"):
+                continue
+            if "/topic/" in href:
+                continue
+            if href.endswith((
+                "breast.html",
+                "colon.html",
+                "ovarytumor.html",
+                "lung.html",
+            )):
+                return href
+        return ""

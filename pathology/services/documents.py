@@ -52,13 +52,19 @@ def parse_document(file_path: Path, category: str) -> ParsedSpecimenData | None:
         procedure_block,
         content[:2000],
     )
-    organ_name = infer_organ_name(raw_specimen_name, category.replace("_", " ").title())
+    organ_name = infer_organ_name(
+        raw_specimen_name,
+        category.replace("_", " ").title(),
+        source_stem=file_path.stem,
+    )
     specimen_name = build_specimen_name(
         raw_specimen_name,
         organ_name,
         specimen_type,
         source_stem=file_path.stem,
     )
+    site_name = _extract_site_name(content, organ_name)
+    laterality = _extract_laterality(content, site_name)
     specimen_size = normalize_specimen_size(
         " ".join(part for part in (raw_specimen_name, procedure_block) if part),
         specimen_type,
@@ -68,8 +74,11 @@ def parse_document(file_path: Path, category: str) -> ParsedSpecimenData | None:
     return ParsedSpecimenData(
         specimen_name=specimen_name,
         organ_name=organ_name,
+        site_name=site_name,
+        laterality=laterality,
         specimen_type=specimen_type,
         specimen_size=specimen_size,
+        source_site="cap.org",
         source_file=file_path,
     )
 
@@ -166,3 +175,56 @@ def _extract_section(content: str, heading: str) -> str:
 def _extract_size(content: str) -> str:
     match = re.search(SIZE_PATTERN, content, flags=re.IGNORECASE)
     return match.group(0) if match else ""
+
+
+def _extract_site_name(content: str, organ_name: str) -> str:
+    lines = [clean_whitespace(line) for line in content.splitlines()]
+    options = _extract_option_values(lines, "tumor site", max_options=16)
+    if not options:
+        return organ_name
+    return "; ".join(options)
+
+
+def _extract_laterality(content: str, site_name: str) -> str:
+    lines = [clean_whitespace(line) for line in content.splitlines()]
+    options = _extract_option_values(lines, "specimen laterality", max_options=8)
+    if not options:
+        laterality_terms = []
+        haystack = site_name.lower()
+        for label in ("Right", "Left", "Bilateral", "Not specified", "Cannot be determined"):
+            if label.lower() in haystack:
+                laterality_terms.append(label)
+        options = laterality_terms
+    return "; ".join(options)
+
+
+def _extract_option_values(lines: list[str], heading_text: str, max_options: int = 12) -> list[str]:
+    for index, line in enumerate(lines):
+        if heading_text not in line.lower():
+            continue
+        options = []
+        started = False
+        for candidate in lines[index + 1:index + 30]:
+            if not candidate:
+                continue
+            if candidate.startswith("___"):
+                started = True
+                label = _clean_option_label(candidate)
+                if label and label not in options:
+                    options.append(label)
+                if len(options) >= max_options:
+                    break
+                continue
+            if started:
+                break
+        if options:
+            return options
+    return []
+
+
+def _clean_option_label(value: str) -> str:
+    cleaned = re.sub(r"^_+\s*", "", value).strip()
+    cleaned = re.sub(r":\s*_+$", "", cleaned)
+    cleaned = re.sub(r":\s*[_\s]+$", "", cleaned)
+    cleaned = cleaned.rstrip(":").strip()
+    return cleaned

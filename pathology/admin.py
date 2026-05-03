@@ -20,7 +20,15 @@ def export_specimens_to_csv(modeladmin, request, queryset):
 
     writer = csv.writer(response)
     writer.writerow(
-        ["Organ Name", "Specimen Name", "Specimen Type", "Specimen Size"]
+        [
+            "Organ Name",
+            "Specimen Name",
+            "Site Name",
+            "Laterality",
+            "Specimen Type",
+            "Specimen Size",
+            "Source Site",
+        ]
     )
 
     for specimen in queryset.select_related("organ"):
@@ -28,8 +36,11 @@ def export_specimens_to_csv(modeladmin, request, queryset):
             [
                 specimen.organ.name,
                 specimen.specimen_name,
+                specimen.site_name,
+                specimen.laterality,
                 specimen.specimen_type,
                 specimen.specimen_size or "",
+                specimen.source_site,
             ]
         )
 
@@ -51,13 +62,16 @@ class SpecimenAdmin(admin.ModelAdmin):
     list_display = (
         "specimen_name",
         "organ",
+        "site_name",
+        "laterality",
         "specimen_type",
+        "source_site",
         "specimen_size",
         "source_file",
         "created_at",
     )
-    search_fields = ("specimen_name", "organ__name")
-    list_filter = ("specimen_type", "organ")
+    search_fields = ("specimen_name", "site_name", "laterality", "organ__name", "source_site")
+    list_filter = ("specimen_type", "organ", "source_site")
     autocomplete_fields = ("organ",)
     actions = (export_specimens_to_csv,)
     change_list_template = "admin/pathology/specimen/change_list.html"
@@ -138,6 +152,7 @@ def stop_crawl_jobs(modeladmin, request, queryset):
 class CrawlJobAdmin(admin.ModelAdmin):
     list_display = (
         "display_name",
+        "crawl_source",
         "status",
         "open_monitor",
         "limit",
@@ -150,8 +165,8 @@ class CrawlJobAdmin(admin.ModelAdmin):
         "started_at",
         "finished_at",
     )
-    search_fields = ("name", "destination_dir", "error_message")
-    list_filter = ("status", "created_at", "started_at", "finished_at")
+    search_fields = ("name", "crawl_source", "destination_dir", "error_message")
+    list_filter = ("crawl_source", "status", "created_at", "started_at", "finished_at")
     change_list_template = "admin/pathology/crawljob/change_list.html"
     readonly_fields = (
         "process_id",
@@ -172,7 +187,14 @@ class CrawlJobAdmin(admin.ModelAdmin):
         (
             "Configuration",
             {
-                "fields": ("name", "status", "limit", "destination_dir", "stop_requested"),
+                "fields": (
+                    "name",
+                    "crawl_source",
+                    "status",
+                    "limit",
+                    "destination_dir",
+                    "stop_requested",
+                ),
             },
         ),
         (
