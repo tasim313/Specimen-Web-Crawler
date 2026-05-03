@@ -7,9 +7,10 @@ import sys
 from pathlib import Path
 
 from django.conf import settings
+from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
-from pathology.models import CrawlJob
+from pathology.models import CrawlJob, Specimen
 
 from .pipeline import CrawlStopped, ProtocolIngestionPipeline
 
@@ -56,6 +57,40 @@ class CrawlJobService:
         job.save(update_fields=updates)
         logger.info("Stop requested for crawl job %s", job.pk)
         return job
+
+
+def start_default_job_if_needed() -> CrawlJob | None:
+    if not getattr(settings, "CAP_AUTO_START_ENABLED", False):
+        return None
+
+    try:
+        if CrawlJob.objects.filter(status=CrawlJob.Status.RUNNING).exists():
+            return None
+
+        job, _ = CrawlJob.objects.get_or_create(
+            name=settings.CAP_AUTO_START_JOB_NAME,
+            defaults={
+                "limit": None,
+                "destination_dir": str(settings.DATA_DIR),
+            },
+        )
+    except (OperationalError, ProgrammingError):
+        return None
+
+    updates: list[str] = []
+    if job.limit is not None:
+        job.limit = None
+        updates.append("limit")
+    if not job.destination_dir:
+        job.destination_dir = str(settings.DATA_DIR)
+        updates.append("destination_dir")
+    if updates:
+        job.save(update_fields=updates)
+
+    if Specimen.objects.exists() and job.status == CrawlJob.Status.COMPLETED:
+        return None
+
+    return CrawlJobService().start_job(job)
 
 
 class CrawlJobRunner:

@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -126,6 +127,11 @@ LOG_DIR.mkdir(exist_ok=True)
 CAP_PROTOCOL_INDEX_URL = (
     "https://www.cap.org/protocols-and-guidelines/"
     "cancer-reporting-tools/cancer-protocol-templates"
+)
+CAP_AUTO_START_ENABLED = os.environ.get("CAP_AUTO_START_ENABLED", "1") == "1"
+CAP_AUTO_START_JOB_NAME = os.environ.get(
+    "CAP_AUTO_START_JOB_NAME",
+    "Automatic CAP Crawl",
 )
 
 LOGGING = {
