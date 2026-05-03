@@ -12,14 +12,25 @@ class Organ(models.Model):
 
 
 class Specimen(models.Model):
+    class SourceSite(models.TextChoices):
+        CAP = "cap.org", "CAP"
+        PATHOLOGY_OUTLINES = "pathologyoutlines.com", "Pathology Outlines"
+
     organ = models.ForeignKey(
         Organ,
         on_delete=models.CASCADE,
         related_name="specimens",
     )
     specimen_name = models.TextField()
+    site_name = models.TextField(blank=True)
+    laterality = models.CharField(max_length=255, blank=True)
     specimen_type = models.CharField(max_length=100)
     specimen_size = models.TextField(blank=True, null=True)
+    source_site = models.CharField(
+        max_length=64,
+        choices=SourceSite.choices,
+        default=SourceSite.CAP,
+    )
     source_file = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -27,6 +38,7 @@ class Specimen(models.Model):
         ordering = ["specimen_name"]
         indexes = [
             models.Index(fields=["specimen_type"]),
+            models.Index(fields=["source_site"]),
             models.Index(fields=["source_file"]),
         ]
         constraints = [
@@ -41,6 +53,11 @@ class Specimen(models.Model):
 
 
 class CrawlJob(models.Model):
+    class SourceChoices(models.TextChoices):
+        CAP = "cap.org", "CAP"
+        PATHOLOGY_OUTLINES = "pathologyoutlines.com", "Pathology Outlines"
+        BOTH = "both", "Both Sources"
+
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         RUNNING = "running", "Running"
@@ -50,6 +67,11 @@ class CrawlJob(models.Model):
         FAILED = "failed", "Failed"
 
     name = models.CharField(max_length=200, blank=True)
+    crawl_source = models.CharField(
+        max_length=64,
+        choices=SourceChoices.choices,
+        default=SourceChoices.CAP,
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,

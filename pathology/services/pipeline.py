@@ -9,7 +9,7 @@ from django.db import transaction
 
 from pathology.models import Organ, Specimen
 
-from .crawler import CAPCrawler
+from .crawler import CAPCrawler, PathologyOutlinesCrawler, SourceUnavailable
 from .documents import parse_document
 
 logger = logging.getLogger("pathology.pipeline")
@@ -28,9 +28,20 @@ class ProtocolIngestionPipeline:
         *,
         limit: int | None = None,
         destination_root: Path | None = None,
+        crawl_source: str = "cap.org",
         should_stop=None,
         progress_callback=None,
     ) -> dict[str, int]:
+        if crawl_source == "pathologyoutlines.com":
+            PathologyOutlinesCrawler().ensure_crawlable()
+        if crawl_source == "both":
+            try:
+                PathologyOutlinesCrawler().ensure_crawlable()
+            except SourceUnavailable:
+                logger.exception(
+                    "Pathology Outlines source is unavailable; continuing with CAP only."
+                )
+
         def emit(summary: dict[str, int]) -> None:
             if progress_callback:
                 progress_callback(summary)
@@ -119,10 +130,19 @@ class ProtocolIngestionPipeline:
         organ, _ = Organ.objects.get_or_create(name=parsed.organ_name)
         relative_source = str(parsed.source_file.relative_to(parsed.source_file.parents[1]))
         relative_stem = Path(relative_source).with_suffix("").as_posix()
-        specimen = Specimen.objects.filter(
-            organ=organ,
-            specimen_name=parsed.specimen_name,
-        ).first()
+        specimen = Specimen.objects.filter(source_file=relative_source).first()
+        if specimen is None:
+            for candidate in Specimen.objects.all():
+                candidate_stem = Path(candidate.source_file).with_suffix("").as_posix()
+                if candidate_stem == relative_stem:
+                    specimen = candidate
+                    break
+
+        if specimen is None:
+            specimen = Specimen.objects.filter(
+                organ=organ,
+                specimen_name=parsed.specimen_name,
+            ).first()
         if specimen is None:
             normalized_name = self._normalize_identity(parsed.specimen_name)
             for candidate in Specimen.objects.filter(organ=organ):
@@ -138,24 +158,35 @@ class ProtocolIngestionPipeline:
             specimen = Specimen.objects.create(
                 organ=organ,
                 specimen_name=parsed.specimen_name,
+                site_name=parsed.site_name,
+                laterality=parsed.laterality,
                 specimen_type=parsed.specimen_type,
                 specimen_size=parsed.specimen_size or "",
+                source_site=parsed.source_site,
                 source_file=relative_source,
             )
             logger.info("Created specimen record for %s", specimen.source_file)
             return "created"
 
         if self._should_update_existing(specimen, parsed, relative_source):
+            specimen.organ = organ
             if relative_source.lower().endswith(".docx"):
                 specimen.specimen_name = parsed.specimen_name
+                specimen.site_name = parsed.site_name
+                specimen.laterality = parsed.laterality
             specimen.specimen_type = parsed.specimen_type
             specimen.specimen_size = parsed.specimen_size or specimen.specimen_size
+            specimen.source_site = parsed.source_site
             specimen.source_file = relative_source
             specimen.save(
                 update_fields=[
+                    "organ",
                     "specimen_name",
+                    "site_name",
+                    "laterality",
                     "specimen_type",
                     "specimen_size",
+                    "source_site",
                     "source_file",
                 ]
             )
@@ -174,9 +205,13 @@ class ProtocolIngestionPipeline:
 
         return any(
             [
+                specimen.organ.name != parsed.organ_name,
                 specimen.specimen_type == "Unknown" and parsed.specimen_type != "Unknown",
                 not specimen.specimen_size and bool(parsed.specimen_size),
                 specimen.specimen_size != (parsed.specimen_size or specimen.specimen_size),
+                specimen.site_name != parsed.site_name and bool(parsed.site_name),
+                specimen.laterality != parsed.laterality and bool(parsed.laterality),
+                specimen.source_site != parsed.source_site,
                 existing_is_pdf and new_is_docx,
                 specimen.specimen_name != parsed.specimen_name and new_is_docx,
             ]

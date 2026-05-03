@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import re
 
-from .constants import ORGAN_KEYWORDS, SPECIMEN_TYPE_MAP, STOPWORDS_IN_SPECIMEN_NAME
+from .constants import (
+    BROAD_CATEGORY_FALLBACKS,
+    ORGAN_KEYWORDS,
+    SPECIMEN_TYPE_MAP,
+    STOPWORDS_IN_SPECIMEN_NAME,
+)
 
 
 def slugify_category(name: str) -> str:
@@ -79,12 +84,18 @@ def normalize_specimen_size(text: str, specimen_type: str, organ_name: str) -> s
     return ""
 
 
-def infer_organ_name(specimen_name: str, fallback: str = "") -> str:
-    haystack = f"{specimen_name} {fallback}".lower()
-    for keyword, normalized in ORGAN_KEYWORDS.items():
+def infer_organ_name(specimen_name: str, fallback: str = "", source_stem: str = "") -> str:
+    haystack = f"{specimen_name} {source_stem} {fallback}".lower()
+    for keyword, normalized in sorted(
+        ORGAN_KEYWORDS.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
         if keyword in haystack:
             return normalized
-    return fallback or "Unknown"
+    if fallback and fallback not in BROAD_CATEGORY_FALLBACKS:
+        return fallback
+    return "Unknown"
 
 
 def build_specimen_name(

@@ -5,8 +5,9 @@ from bs4 import BeautifulSoup
 from django.test import TestCase
 
 from pathology.models import CrawlJob, Organ, Specimen
-from pathology.services.crawler import CAPCrawler
+from pathology.services.crawler import CAPCrawler, SourceUnavailable
 from pathology.services.jobs import CrawlJobService, start_default_job_if_needed
+from pathology.services.documents import _extract_laterality, _extract_site_name
 from pathology.services.normalizers import (
     build_specimen_name,
     infer_organ_name,
@@ -31,6 +32,26 @@ class NormalizerTests(TestCase):
             "Breast",
         )
 
+    def test_organ_inference_prefers_specific_keyword_over_partial_match(self):
+        self.assertEqual(
+            infer_organ_name(
+                "Specimens from patients with carcinoma of the gallbladder",
+                "Gastrointestinal",
+                "gallbladder",
+            ),
+            "Gallbladder",
+        )
+
+    def test_organ_inference_uses_source_stem_before_broad_category_fallback(self):
+        self.assertEqual(
+            infer_organ_name(
+                "Specimens from patients with thymic tumors",
+                "Thorax",
+                "thymus",
+            ),
+            "Thymus",
+        )
+
     def test_specimen_size_normalization_prefers_clinical_buckets(self):
         self.assertEqual(
             normalize_specimen_size("core needle biopsy", "Needle Biopsy", "Breast"),
@@ -46,6 +67,36 @@ class NormalizerTests(TestCase):
                 "breast_dcis_biopsy",
             ),
             "Breast DCIS biopsy specimen",
+        )
+
+    def test_extract_site_name_collects_tumor_site_options(self):
+        content = "\n".join(
+            [
+                "Tumor Site",
+                "___ Upper outer quadrant",
+                "___ Lower outer quadrant",
+                "___ Central",
+                "Histologic Type",
+            ]
+        )
+        self.assertEqual(
+            _extract_site_name(content, "Breast"),
+            "Upper outer quadrant; Lower outer quadrant; Central",
+        )
+
+    def test_extract_laterality_collects_laterality_options(self):
+        content = "\n".join(
+            [
+                "Specimen Laterality",
+                "___ Right",
+                "___ Left",
+                "___ Not specified",
+                "Tumor Site",
+            ]
+        )
+        self.assertEqual(
+            _extract_laterality(content, ""),
+            "Right; Left; Not specified",
         )
 
 
@@ -115,15 +166,21 @@ class PipelinePersistenceTests(TestCase):
         parsed = ParsedSpecimenData(
             specimen_name="Breast Invasive Carcinoma",
             organ_name="Breast",
+            site_name="Upper outer quadrant",
+            laterality="Right",
             specimen_type="Resection",
             specimen_size="3.2 cm",
+            source_site="cap.org",
             source_file=Path("data/breast/breast_invasive_resection.pdf"),
         )
         parsed_docx = ParsedSpecimenData(
             specimen_name="Breast Invasive Carcinoma",
             organ_name="Breast",
+            site_name="Upper outer quadrant",
+            laterality="Right",
             specimen_type="Resection",
             specimen_size="3.2 cm",
+            source_site="cap.org",
             source_file=Path("data/breast/breast_invasive_resection.docx"),
         )
 
@@ -137,6 +194,9 @@ class PipelinePersistenceTests(TestCase):
         self.assertTrue(
             Specimen.objects.get().source_file.endswith(".docx")
         )
+        self.assertEqual(Specimen.objects.get().site_name, "Upper outer quadrant")
+        self.assertEqual(Specimen.objects.get().laterality, "Right")
+        self.assertEqual(Specimen.objects.get().source_site, "cap.org")
 
     @patch("pathology.services.pipeline.parse_document")
     def test_pipeline_inserts_while_crawl_is_running(self, mock_parse_document):
@@ -180,15 +240,21 @@ class PipelinePersistenceTests(TestCase):
             ParsedSpecimenData(
                 specimen_name="Breast DCIS resection specimen",
                 organ_name="Breast",
+                site_name="Upper outer quadrant",
+                laterality="Right",
                 specimen_type="Resection",
                 specimen_size="Large",
+                source_site="cap.org",
                 source_file=Path("data/breast/breast_dcis_resection.docx"),
             ),
             ParsedSpecimenData(
                 specimen_name="Thyroid specimen",
                 organ_name="Thyroid",
+                site_name="Thyroid",
+                laterality="",
                 specimen_type="Unknown",
                 specimen_size="",
+                source_site="cap.org",
                 source_file=Path("data/endocrine/thyroid.docx"),
             ),
         ]
@@ -201,6 +267,57 @@ class PipelinePersistenceTests(TestCase):
         self.assertEqual(Specimen.objects.count(), 2)
         self.assertTrue(any(item["created"] == 1 for item in progress))
         self.assertTrue(any(item["created"] == 2 for item in progress))
+
+    def test_upsert_moves_existing_record_to_correct_organ_when_source_matches(self):
+        old_organ = Organ.objects.create(name="Endocrine")
+        Specimen.objects.create(
+            organ=old_organ,
+            specimen_name="Specimens from with of the Gallbladder",
+            specimen_type="Unknown",
+            specimen_size="",
+            source_file="gastrointestinal/gallbladder.docx",
+        )
+        pipeline = ProtocolIngestionPipeline(crawler=None)
+        parsed = ParsedSpecimenData(
+            specimen_name="Gallbladder resection specimen",
+            organ_name="Gallbladder",
+            site_name="Gallbladder",
+            laterality="",
+            specimen_type="Resection",
+            specimen_size="Medium (Length/Diameter)",
+            source_site="cap.org",
+            source_file=Path("data/gastrointestinal/gallbladder.docx"),
+        )
+
+        result = pipeline._upsert_specimen(parsed)
+
+        self.assertEqual(result, "updated")
+        specimen = Specimen.objects.get(source_file="gastrointestinal/gallbladder.docx")
+        self.assertEqual(specimen.organ.name, "Gallbladder")
+        self.assertEqual(specimen.specimen_type, "Resection")
+
+    @patch("pathology.services.pipeline.PathologyOutlinesCrawler.ensure_crawlable")
+    def test_pipeline_pathology_outlines_source_raises_real_source_error(self, mock_ensure):
+        mock_ensure.side_effect = SourceUnavailable("blocked")
+        pipeline = ProtocolIngestionPipeline(crawler=None)
+
+        with self.assertRaises(SourceUnavailable):
+            pipeline.run(crawl_source="pathologyoutlines.com")
+
+    @patch("pathology.services.pipeline.PathologyOutlinesCrawler.ensure_crawlable")
+    @patch("pathology.services.pipeline.CAPCrawler.collect_document_links")
+    def test_pipeline_both_sources_continues_with_cap_when_pathology_outlines_blocked(
+        self,
+        mock_collect,
+        mock_ensure,
+    ):
+        mock_ensure.side_effect = SourceUnavailable("blocked")
+        mock_collect.return_value = []
+        pipeline = ProtocolIngestionPipeline(crawler=CAPCrawler())
+
+        summary = pipeline.run(crawl_source="both")
+
+        self.assertEqual(summary["links"], 0)
 
 
 class CrawlJobTests(TestCase):
@@ -238,6 +355,7 @@ class CrawlJobTests(TestCase):
         created_job = CrawlJob.objects.get(name="Automatic CAP Crawl")
         self.assertIsNone(created_job.limit)
         self.assertTrue(created_job.destination_dir.endswith("/data"))
+        self.assertEqual(created_job.crawl_source, "cap.org")
         mock_start_job.assert_called_once_with(created_job)
 
     @patch("pathology.services.jobs.CrawlJobService.start_job")

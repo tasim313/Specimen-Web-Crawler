@@ -106,6 +106,7 @@ class CrawlJobRunner:
             summary = self.pipeline.run(
                 limit=self.job.limit,
                 destination_root=destination,
+                crawl_source=self.job.crawl_source,
                 should_stop=self.should_stop,
                 progress_callback=self._update_progress,
             )

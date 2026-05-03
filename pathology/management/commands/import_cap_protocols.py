@@ -4,6 +4,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
+from pathology.models import CrawlJob
 from pathology.services.pipeline import ProtocolIngestionPipeline
 
 
@@ -23,12 +24,20 @@ class Command(BaseCommand):
             default=None,
             help="Optional destination directory for downloaded CAP files.",
         )
+        parser.add_argument(
+            "--source",
+            type=str,
+            default=CrawlJob.SourceChoices.CAP,
+            choices=CrawlJob.SourceChoices.values,
+            help="Which upstream source to crawl.",
+        )
 
     def handle(self, *args, **options):
         destination = Path(options["destination"]) if options["destination"] else None
         summary = ProtocolIngestionPipeline().run(
             limit=options["limit"],
             destination_root=destination,
+            crawl_source=options["source"],
         )
         self.stdout.write(self.style.SUCCESS("CAP protocol import completed."))
         for key, value in summary.items():

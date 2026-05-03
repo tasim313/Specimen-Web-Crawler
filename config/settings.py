@@ -28,7 +28,7 @@ SECRET_KEY = 'django-insecure-pbu0v)h3@*xucwaf-!obj6d)(#78*bse*2&0#^hbak&5l(19%j
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ["127.0.0.1", "localhost", "testserver"]
+ALLOWED_HOSTS = ["127.0.0.1", "localhost", "testserver", "*"]
 
 
 # Application definition
@@ -128,6 +128,7 @@ CAP_PROTOCOL_INDEX_URL = (
     "https://www.cap.org/protocols-and-guidelines/"
     "cancer-reporting-tools/cancer-protocol-templates"
 )
+PATHOLOGY_OUTLINES_SITEMAP_URL = "https://www.pathologyoutlines.com/sitemap.xml"
 CAP_AUTO_START_ENABLED = os.environ.get("CAP_AUTO_START_ENABLED", "1") == "1"
 CAP_AUTO_START_JOB_NAME = os.environ.get(
     "CAP_AUTO_START_JOB_NAME",
