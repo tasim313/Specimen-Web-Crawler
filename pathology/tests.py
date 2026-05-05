@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 from django.test import TestCase
 
 from pathology.models import CrawlJob, Organ, Specimen
-from pathology.services.crawler import CAPCrawler, SourceUnavailable
+from pathology.services.crawler import CAPCrawler, PathologyOutlinesCrawler, SourceUnavailable
 from pathology.services.jobs import CrawlJobService, start_default_job_if_needed
 from pathology.services.documents import _extract_laterality, _extract_site_name
 from pathology.services.normalizers import (
@@ -158,6 +158,62 @@ class CrawlerParsingTests(TestCase):
 
         self.assertEqual(len(downloaded), 1)
         self.assertEqual(mock_download.call_count, 1)
+
+    def test_pathology_outlines_topic_parser_extracts_structured_specimen_data(self):
+        html = """
+        <html>
+            <head>
+                <title>Pathology Outlines - Colon adenocarcinoma</title>
+                <meta property="og:title" content="Pathology Outlines - Colon adenocarcinoma" />
+            </head>
+            <body>
+                <h1>Colon adenocarcinoma</h1>
+                <h2>Site</h2>
+                <ul>
+                    <li>Ascending colon</li>
+                    <li>Transverse colon</li>
+                </ul>
+                <h2>Treatment</h2>
+                <p>Colectomy specimen</p>
+            </body>
+        </html>
+        """
+        crawler = PathologyOutlinesCrawler()
+
+        parsed = crawler._parse_topic_page(
+            html,
+            "https://www.pathologyoutlines.com/topic/colonadenocarcinoma.html",
+            "Colon",
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.organ_name, "Colon")
+        self.assertEqual(parsed.site_name, "Ascending colon; Transverse colon")
+        self.assertEqual(parsed.source_site, "pathologyoutlines.com")
+        self.assertIn("Colon", parsed.specimen_name)
+
+    def test_pathology_outlines_chapter_parser_collects_unique_topic_links(self):
+        html = """
+        <html>
+            <body>
+                <a href="/topic/colonadenocarcinoma.html">Colon adenocarcinoma</a>
+                <a href="https://www.pathologyoutlines.com/topic/colonadenocarcinoma.html">Duplicate</a>
+                <a href="/topic/libraryroche.html">Library</a>
+                <a href="/topic/colonpolyp.html">Colon polyp</a>
+            </body>
+        </html>
+        """
+        crawler = PathologyOutlinesCrawler()
+
+        urls = crawler._topic_urls_from_chapter(BeautifulSoup(html, "html.parser"))
+
+        self.assertEqual(
+            urls,
+            [
+                "https://www.pathologyoutlines.com/topic/colonadenocarcinoma.html",
+                "https://www.pathologyoutlines.com/topic/colonpolyp.html",
+            ],
+        )
 
 
 class PipelinePersistenceTests(TestCase):
@@ -318,6 +374,34 @@ class PipelinePersistenceTests(TestCase):
         summary = pipeline.run(crawl_source="both")
 
         self.assertEqual(summary["links"], 0)
+
+    def test_pipeline_pathology_outlines_source_uses_html_collector(self):
+        parsed = ParsedSpecimenData(
+            specimen_name="Colon adenocarcinoma of colon",
+            organ_name="Colon",
+            site_name="Ascending colon",
+            laterality="",
+            specimen_type="Unknown",
+            specimen_size="",
+            source_site="pathologyoutlines.com",
+            source_file=Path("pathologyoutlines/topic/colonadenocarcinoma.html"),
+        )
+
+        class StubPathologyOutlinesCrawler:
+            def collect_specimens(self, *, limit=None, should_stop=None):
+                return [parsed]
+
+        pipeline = ProtocolIngestionPipeline(
+            crawler=CAPCrawler(),
+            pathology_outlines_crawler=StubPathologyOutlinesCrawler(),
+        )
+
+        summary = pipeline.run(crawl_source="pathologyoutlines.com")
+
+        self.assertEqual(summary["created"], 1)
+        self.assertEqual(summary["files"], 1)
+        self.assertEqual(Specimen.objects.count(), 1)
+        self.assertEqual(Specimen.objects.get().source_site, "pathologyoutlines.com")
 
 
 class CrawlJobTests(TestCase):

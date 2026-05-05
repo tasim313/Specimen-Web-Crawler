@@ -20,8 +20,13 @@ class CrawlStopped(Exception):
 
 
 class ProtocolIngestionPipeline:
-    def __init__(self, crawler: CAPCrawler | None = None):
+    def __init__(
+        self,
+        crawler: CAPCrawler | None = None,
+        pathology_outlines_crawler: PathologyOutlinesCrawler | None = None,
+    ):
         self.crawler = crawler or CAPCrawler()
+        self.pathology_outlines_crawler = pathology_outlines_crawler or PathologyOutlinesCrawler()
 
     def run(
         self,
@@ -32,27 +37,74 @@ class ProtocolIngestionPipeline:
         should_stop=None,
         progress_callback=None,
     ) -> dict[str, int]:
-        if crawl_source == "pathologyoutlines.com":
-            PathologyOutlinesCrawler().ensure_crawlable()
-        if crawl_source == "both":
-            try:
-                PathologyOutlinesCrawler().ensure_crawlable()
-            except SourceUnavailable:
-                logger.exception(
-                    "Pathology Outlines source is unavailable; continuing with CAP only."
-                )
-
         def emit(summary: dict[str, int]) -> None:
             if progress_callback:
                 progress_callback(summary)
 
+        def empty_summary() -> dict[str, int]:
+            return {
+                "links": 0,
+                "files": 0,
+                "created": 0,
+                "updated": 0,
+                "skipped": 0,
+            }
+
+        def merge_summary(
+            left: dict[str, int],
+            right: dict[str, int],
+        ) -> dict[str, int]:
+            return {
+                key: left.get(key, 0) + right.get(key, 0)
+                for key in {"links", "files", "created", "updated", "skipped"}
+            }
+
         if should_stop and should_stop():
             raise CrawlStopped("Crawl was stopped before it started.")
 
+        summary = empty_summary()
+        remaining_limit = limit
+
+        if crawl_source in {"cap.org", "both"}:
+            cap_summary = self._run_cap_ingestion(
+                limit=remaining_limit,
+                destination_root=destination_root,
+                should_stop=should_stop,
+                progress_callback=lambda partial: emit(merge_summary(summary, partial)),
+            )
+            summary = merge_summary(summary, cap_summary)
+            if remaining_limit is not None:
+                remaining_limit = max(remaining_limit - cap_summary["files"], 0)
+
+        if crawl_source in {"pathologyoutlines.com", "both"}:
+            try:
+                pathout_summary = self._run_pathology_outlines_ingestion(
+                    limit=remaining_limit,
+                    should_stop=should_stop,
+                    progress_callback=lambda partial: emit(merge_summary(summary, partial)),
+                )
+                summary = merge_summary(summary, pathout_summary)
+            except SourceUnavailable:
+                if crawl_source == "pathologyoutlines.com":
+                    raise
+                logger.exception(
+                    "Pathology Outlines source is unavailable; continuing with CAP only."
+                )
+
+        return summary
+
+    def _run_cap_ingestion(
+        self,
+        *,
+        limit: int | None,
+        destination_root: Path | None,
+        should_stop,
+        progress_callback,
+    ) -> dict[str, int]:
         links = self.crawler.collect_document_links()
         if limit is not None:
             links = links[:limit]
-        emit(
+        progress_callback(
             {
                 "links": len(links),
                 "files": 0,
@@ -88,7 +140,7 @@ class ProtocolIngestionPipeline:
             parsed = parse_document(Path(file_path), category)
             if not parsed:
                 skipped += 1
-                emit(
+                progress_callback(
                     {
                         "links": len(links),
                         "files": files_downloaded,
@@ -107,7 +159,7 @@ class ProtocolIngestionPipeline:
             else:
                 skipped += 1
 
-            emit(
+            progress_callback(
                 {
                     "links": len(links),
                     "files": files_downloaded,
@@ -120,6 +172,61 @@ class ProtocolIngestionPipeline:
         return {
             "links": len(links),
             "files": files_downloaded,
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+        }
+
+    def _run_pathology_outlines_ingestion(
+        self,
+        *,
+        limit: int | None,
+        should_stop,
+        progress_callback,
+    ) -> dict[str, int]:
+        specimens = self.pathology_outlines_crawler.collect_specimens(
+            limit=limit,
+            should_stop=should_stop,
+        )
+        progress_callback(
+            {
+                "links": len(specimens),
+                "files": 0,
+                "created": 0,
+                "updated": 0,
+                "skipped": 0,
+            }
+        )
+
+        created = 0
+        updated = 0
+        skipped = 0
+        processed = 0
+
+        for parsed in specimens:
+            if should_stop and should_stop():
+                raise CrawlStopped("Crawl was stopped while processing Pathology Outlines topics.")
+            processed += 1
+            status = self._upsert_specimen(parsed)
+            if status == "created":
+                created += 1
+            elif status == "updated":
+                updated += 1
+            else:
+                skipped += 1
+            progress_callback(
+                {
+                    "links": len(specimens),
+                    "files": processed,
+                    "created": created,
+                    "updated": updated,
+                    "skipped": skipped,
+                }
+            )
+
+        return {
+            "links": len(specimens),
+            "files": processed,
             "created": created,
             "updated": updated,
             "skipped": skipped,

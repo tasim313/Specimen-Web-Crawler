@@ -11,8 +11,15 @@ import requests
 from bs4 import BeautifulSoup
 from django.conf import settings
 
-from .normalizers import clean_whitespace, slugify_category
-from .types import ProtocolDocumentLink
+from .normalizers import (
+    build_specimen_name,
+    clean_whitespace,
+    infer_organ_name,
+    infer_specimen_type,
+    normalize_specimen_size,
+    slugify_category,
+)
+from .types import ParsedSpecimenData, ProtocolDocumentLink
 
 logger = logging.getLogger("pathology.crawler")
 
@@ -285,6 +292,32 @@ class CAPCrawler:
 
 class PathologyOutlinesCrawler:
     source_site = "pathologyoutlines.com"
+    base_url = "https://www.pathologyoutlines.com/"
+    excluded_topic_prefixes = (
+        "/topic/library",
+        "/topic/covid",
+    )
+    excluded_chapter_paths = {
+        "/",
+        "/aboutus.html",
+        "/authors",
+        "/books",
+        "/cme",
+        "/conferences",
+        "/contactus.html",
+        "/crossword.html",
+        "/directory",
+        "/fellowships",
+        "/grants.html",
+        "/informatrics.html",
+        "/jobs",
+        "/monthlystats.php",
+        "/privacy.html",
+        "/review-questions",
+        "/staging.html",
+        "/subscribe.html",
+        "/whoclassification.html",
+    }
 
     def __init__(self, sitemap_url: str | None = None):
         self.sitemap_url = sitemap_url or settings.PATHOLOGY_OUTLINES_SITEMAP_URL
@@ -308,9 +341,59 @@ class PathologyOutlinesCrawler:
                 "Pathology Outlines chapter content returned 503; source is blocked from this environment."
             )
 
-        raise SourceUnavailable(
-            "Pathology Outlines is reachable, but topic extraction is not implemented yet for this site."
-        )
+    def collect_specimens(
+        self,
+        *,
+        limit: int | None = None,
+        should_stop=None,
+    ) -> list[ParsedSpecimenData]:
+        self.ensure_crawlable()
+        sitemap_html = self._fetch_html(self.sitemap_url)
+        sitemap_soup = BeautifulSoup(sitemap_html, "xml")
+        chapter_urls = self._chapter_urls_from_sitemap(sitemap_soup)
+
+        specimens: list[ParsedSpecimenData] = []
+        seen_topic_urls: set[str] = set()
+
+        for chapter_url in chapter_urls:
+            if should_stop and should_stop():
+                break
+            if limit is not None and len(specimens) >= limit:
+                break
+
+            chapter_html = self._fetch_html(chapter_url)
+            if "503 Service Unavailable" in chapter_html:
+                logger.warning("Skipping blocked chapter page: %s", chapter_url)
+                continue
+
+            chapter_soup = BeautifulSoup(chapter_html, "html.parser")
+            chapter_name = self._chapter_name(chapter_url, chapter_soup)
+
+            for topic_url in self._topic_urls_from_chapter(chapter_soup):
+                if should_stop and should_stop():
+                    break
+                if limit is not None and len(specimens) >= limit:
+                    break
+                if topic_url in seen_topic_urls:
+                    continue
+                seen_topic_urls.add(topic_url)
+
+                try:
+                    topic_html = self._fetch_html(topic_url)
+                except Exception:
+                    logger.exception("Failed to fetch topic page: %s", topic_url)
+                    continue
+
+                if "503 Service Unavailable" in topic_html:
+                    logger.warning("Skipping blocked topic page: %s", topic_url)
+                    continue
+
+                parsed = self._parse_topic_page(topic_html, topic_url, chapter_name)
+                if parsed is not None:
+                    specimens.append(parsed)
+
+        logger.info("Collected %s Pathology Outlines topics", len(specimens))
+        return specimens
 
     def _fetch_html(self, url: str) -> str:
         response = requests.get(
@@ -328,17 +411,209 @@ class PathologyOutlinesCrawler:
         return response.text
 
     def _first_chapter_url(self, soup: BeautifulSoup) -> str:
-        for anchor in soup.find_all("a", href=True):
-            href = anchor["href"]
-            if not href.startswith("https://www.pathologyoutlines.com/"):
-                continue
-            if "/topic/" in href:
-                continue
-            if href.endswith((
-                "breast.html",
-                "colon.html",
-                "ovarytumor.html",
-                "lung.html",
-            )):
-                return href
+        for url in self._chapter_urls_from_sitemap(soup):
+            if url.endswith(("breast.html", "colon.html", "ovarytumor.html", "lung.html")):
+                return url
+        for url in self._chapter_urls_from_sitemap(soup):
+            return url
         return ""
+
+    def _chapter_urls_from_sitemap(self, soup: BeautifulSoup) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        for loc in soup.find_all("loc"):
+            href = clean_whitespace(loc.get_text(" ", strip=True))
+            if not href.startswith(self.base_url):
+                continue
+
+            parsed = urlparse(href)
+            path = parsed.path
+            if not path or "/topic/" in path:
+                continue
+            if not path.endswith(".html"):
+                continue
+            if path in self.excluded_chapter_paths:
+                continue
+            if href in seen:
+                continue
+
+            seen.add(href)
+            urls.append(href)
+
+        return urls
+
+    def _topic_urls_from_chapter(self, soup: BeautifulSoup) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        for anchor in soup.find_all("a", href=True):
+            href = urljoin(self.base_url, anchor["href"])
+            parsed = urlparse(href)
+            if parsed.netloc != urlparse(self.base_url).netloc:
+                continue
+            if not parsed.path.startswith("/topic/") or not parsed.path.endswith(".html"):
+                continue
+            if any(parsed.path.startswith(prefix) for prefix in self.excluded_topic_prefixes):
+                continue
+            if href in seen:
+                continue
+
+            seen.add(href)
+            urls.append(href)
+
+        return urls
+
+    def _chapter_name(self, chapter_url: str, soup: BeautifulSoup) -> str:
+        for selector in ("h1", "meta[property='og:title']", "title"):
+            tag = soup.select_one(selector)
+            if tag is None:
+                continue
+            text = tag.get("content", "") if tag.name == "meta" else tag.get_text(" ", strip=True)
+            cleaned = self._clean_page_title(text)
+            if cleaned and "503 Service Unavailable" not in cleaned:
+                return cleaned
+
+        stem = Path(urlparse(chapter_url).path).stem
+        return clean_whitespace(stem.replace("_", " ").replace("-", " ").title())
+
+    def _parse_topic_page(
+        self,
+        html: str,
+        topic_url: str,
+        chapter_name: str,
+    ) -> ParsedSpecimenData | None:
+        soup = BeautifulSoup(html, "html.parser")
+        title = self._extract_topic_title(soup, topic_url)
+        if not title:
+            return None
+
+        text_content = self._extract_topic_text(soup)
+        organ_name = infer_organ_name(
+            title,
+            fallback=chapter_name,
+            source_stem=Path(urlparse(topic_url).path).stem,
+        )
+        specimen_type = infer_specimen_type(title, body_excerpt=text_content[:4000])
+        specimen_name = build_specimen_name(
+            title,
+            organ_name,
+            specimen_type,
+            source_stem=Path(urlparse(topic_url).path).stem,
+        )
+        site_name = self._extract_site_name_from_topic(text_content, organ_name)
+        laterality = self._extract_laterality_from_topic(text_content, site_name)
+        specimen_size = normalize_specimen_size(
+            f"{title}\n{text_content[:2000]}",
+            specimen_type,
+            organ_name,
+        )
+
+        return ParsedSpecimenData(
+            specimen_name=specimen_name,
+            organ_name=organ_name,
+            site_name=site_name,
+            laterality=laterality,
+            specimen_type=specimen_type,
+            specimen_size=specimen_size,
+            source_site=self.source_site,
+            source_file=Path(f"pathologyoutlines{urlparse(topic_url).path}"),
+        )
+
+    def _extract_topic_title(self, soup: BeautifulSoup, topic_url: str) -> str:
+        for selector in ("h1", "meta[property='og:title']", "title"):
+            tag = soup.select_one(selector)
+            if tag is None:
+                continue
+            text = tag.get("content", "") if tag.name == "meta" else tag.get_text(" ", strip=True)
+            cleaned = self._clean_page_title(text)
+            if cleaned and "503 Service Unavailable" not in cleaned:
+                return cleaned
+
+        stem = Path(urlparse(topic_url).path).stem
+        return clean_whitespace(stem.replace("_", " ").replace("-", " ").title())
+
+    def _clean_page_title(self, value: str) -> str:
+        text = clean_whitespace(value)
+        text = re.sub(r"^Pathology Outlines\s*-\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^Topic\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\.html?$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*\|\s*Pathology Outlines.*$", "", text, flags=re.IGNORECASE)
+        return clean_whitespace(text)
+
+    def _extract_topic_text(self, soup: BeautifulSoup) -> str:
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+
+        chunks: list[str] = []
+        for tag in soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "td", "th", "dt", "dd"]):
+            text = clean_whitespace(tag.get_text(" ", strip=True))
+            if not text:
+                continue
+            if text in {"Menu", "Jobs", "Books", "Contact Us"}:
+                continue
+            chunks.append(text)
+        return "\n".join(chunks)
+
+    def _extract_site_name_from_topic(self, text_content: str, organ_name: str) -> str:
+        lines = [clean_whitespace(line) for line in text_content.splitlines() if clean_whitespace(line)]
+        for heading in ("site", "sites", "origin", "location", "organ"):
+            section = self._extract_text_section(lines, heading)
+            if section:
+                values = self._split_section_values(section)
+                if values:
+                    return "; ".join(values[:6])
+        return organ_name
+
+    def _extract_laterality_from_topic(self, text_content: str, site_name: str) -> str:
+        haystack = f"{text_content}\n{site_name}".lower()
+        matches = []
+        for label in ("Right", "Left", "Bilateral"):
+            if label.lower() in haystack:
+                matches.append(label)
+        return "; ".join(matches)
+
+    def _extract_text_section(self, lines: list[str], heading: str) -> str:
+        target = heading.lower()
+        for index, line in enumerate(lines):
+            normalized = line.lower().rstrip(":")
+            if normalized != target:
+                continue
+
+            section_lines: list[str] = []
+            for candidate in lines[index + 1:index + 8]:
+                candidate_lower = candidate.lower().rstrip(":")
+                if candidate_lower in {
+                    "definition / general",
+                    "essential features",
+                    "terminology",
+                    "pathophysiology",
+                    "gross description",
+                    "microscopic (histologic) description",
+                    "treatment",
+                    "prognostic factors",
+                    "staging",
+                    "cytology description",
+                    "positive stains",
+                    "negative stains",
+                }:
+                    break
+                if len(candidate) <= 2:
+                    continue
+                section_lines.append(candidate)
+            if section_lines:
+                return "\n".join(section_lines)
+        return ""
+
+    def _split_section_values(self, value: str) -> list[str]:
+        parts = re.split(r"\s*[;|]\s*|\n+|\s{2,}", value)
+        cleaned: list[str] = []
+        for part in parts:
+            normalized = clean_whitespace(part).strip(" -,:")
+            if not normalized:
+                continue
+            if normalized.lower() in {"site", "sites", "location", "organ"}:
+                continue
+            if normalized not in cleaned:
+                cleaned.append(normalized)
+        return cleaned
