@@ -14,6 +14,7 @@ from django.conf import settings
 from .normalizers import (
     build_specimen_name,
     clean_whitespace,
+    infer_clinical_flags,
     infer_organ_name,
     infer_specimen_type,
     normalize_specimen_size,
@@ -156,6 +157,12 @@ class CAPCrawler:
         logger.info("Collected %s document links from table fallback", len(documents))
         return documents
 
+    def _destination_for(self, document: ProtocolDocumentLink) -> str:
+        slug = slugify_category(document.protocol_name).replace("__", "_")
+        parsed = urlparse(document.file_url)
+        suffix = Path(parsed.path).suffix or f".{document.file_type}"
+        return f"{slug}{suffix}"
+
     def _parse_current_protocol_links(self, soup: BeautifulSoup) -> list[ProtocolDocumentLink]:
         section_heading = soup.find(
             lambda tag: getattr(tag, "name", None) in {"h2", "h3", "h4"}
@@ -166,7 +173,8 @@ class CAPCrawler:
             return []
 
         documents: list[ProtocolDocumentLink] = []
-        seen: set[tuple[str, str]] = set()
+        seen_urls: set[str] = set()
+        seen_destinations: set[str] = set()
         current_category = "general"
         current_protocol = ""
 
@@ -205,26 +213,30 @@ class CAPCrawler:
                 continue
 
             file_url = urljoin(self.base_url, tag["href"])
-            key = (current_protocol, file_url)
-            if key in seen:
+            if file_url in seen_urls:
                 continue
 
-            seen.add(key)
-            documents.append(
-                ProtocolDocumentLink(
-                    category=current_category,
-                    protocol_name=current_protocol,
-                    file_url=file_url,
-                    file_type=file_type,
-                    source_site=self.source_site,
-                )
+            document = ProtocolDocumentLink(
+                category=current_category,
+                protocol_name=current_protocol,
+                file_url=file_url,
+                file_type=file_type,
+                source_site=self.source_site,
             )
+            destination = self._destination_for(document)
+            if destination in seen_destinations:
+                continue
+
+            seen_urls.add(file_url)
+            seen_destinations.add(destination)
+            documents.append(document)
 
         return documents
 
     def _parse_links_from_tables(self, soup: BeautifulSoup) -> list[ProtocolDocumentLink]:
         documents: list[ProtocolDocumentLink] = []
-        seen: set[tuple[str, str]] = set()
+        seen_urls: set[str] = set()
+        seen_destinations: set[str] = set()
         for table in soup.find_all("table"):
             category = self._find_category_for_table(table)
             if not category or category.lower() == "latest news and resources":
@@ -246,20 +258,23 @@ class CAPCrawler:
                         continue
 
                     file_url = urljoin(self.base_url, href)
-                    key = (protocol_name, file_url)
-                    if key in seen:
+                    if file_url in seen_urls:
                         continue
 
-                    seen.add(key)
-                    documents.append(
-                        ProtocolDocumentLink(
-                            category=category,
-                            protocol_name=protocol_name,
-                            file_url=file_url,
-                            file_type=file_type,
-                            source_site=self.source_site,
-                        )
+                    document = ProtocolDocumentLink(
+                        category=category,
+                        protocol_name=protocol_name,
+                        file_url=file_url,
+                        file_type=file_type,
+                        source_site=self.source_site,
                     )
+                    destination = self._destination_for(document)
+                    if destination in seen_destinations:
+                        continue
+
+                    seen_urls.add(file_url)
+                    seen_destinations.add(destination)
+                    documents.append(document)
 
         return documents
 
@@ -276,10 +291,7 @@ class CAPCrawler:
         return None
 
     def _filename_for(self, document: ProtocolDocumentLink) -> str:
-        slug = slugify_category(document.protocol_name).replace("__", "_")
-        parsed = urlparse(document.file_url)
-        suffix = Path(parsed.path).suffix or f".{document.file_type}"
-        return f"{slug}{suffix}"
+        return self._destination_for(document)
 
     def _download_file(self, url: str, destination: Path) -> None:
         response = requests.get(url, timeout=120, stream=True)
@@ -396,19 +408,33 @@ class PathologyOutlinesCrawler:
         return specimens
 
     def _fetch_html(self, url: str) -> str:
-        response = requests.get(
-            url,
-            timeout=60,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0 Safari/537.36"
+        for attempt in range(1, 6):
+            try:
+                response = requests.get(
+                    url,
+                    timeout=60,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (X11; Linux x86_64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0 Safari/537.36"
+                        )
+                    },
                 )
-            },
-        )
-        response.raise_for_status()
-        return response.text
+                response.raise_for_status()
+                return response.text
+            except requests.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                if status_code == 429 and attempt < 5:
+                    sleep_time = (2 ** attempt) + random.uniform(1, 3)
+                    logger.warning("HTTP 429 for %s, retrying in %.2fs (attempt %s/5)...", url, sleep_time, attempt)
+                    time.sleep(sleep_time)
+                    continue
+                if status_code in {403, 429, 503}:
+                    raise SourceUnavailable(
+                        f"Pathology Outlines returned HTTP {status_code} for {url}."
+                    ) from exc
+                raise
 
     def _first_chapter_url(self, soup: BeautifulSoup) -> str:
         for url in self._chapter_urls_from_sitemap(soup):
@@ -508,6 +534,13 @@ class PathologyOutlinesCrawler:
             specimen_type,
             organ_name,
         )
+        procedure_name = self._extract_procedure_name_from_topic(text_content, title, specimen_type)
+        clinical_flags = infer_clinical_flags(
+            title,
+            procedure_name,
+            specimen_type,
+            text_content[:6000],
+        )
 
         return ParsedSpecimenData(
             specimen_name=specimen_name,
@@ -518,6 +551,8 @@ class PathologyOutlinesCrawler:
             specimen_size=specimen_size,
             source_site=self.source_site,
             source_file=Path(f"pathologyoutlines{urlparse(topic_url).path}"),
+            procedure_name=procedure_name,
+            **clinical_flags,
         )
 
     def _extract_topic_title(self, soup: BeautifulSoup, topic_url: str) -> str:
@@ -572,6 +607,23 @@ class PathologyOutlinesCrawler:
             if label.lower() in haystack:
                 matches.append(label)
         return "; ".join(matches)
+
+    def _extract_procedure_name_from_topic(
+        self,
+        text_content: str,
+        title: str,
+        specimen_type: str,
+    ) -> str:
+        lines = [clean_whitespace(line) for line in text_content.splitlines() if clean_whitespace(line)]
+        for heading in ("procedure", "procedures", "treatment"):
+            section = self._extract_text_section(lines, heading)
+            if section:
+                values = self._split_section_values(section)
+                if values:
+                    return "; ".join(values[:6])[:255]
+        if specimen_type and specimen_type != "Unknown":
+            return specimen_type
+        return clean_whitespace(title)[:255]
 
     def _extract_text_section(self, lines: list[str], heading: str) -> str:
         target = heading.lower()

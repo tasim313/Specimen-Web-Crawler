@@ -1,15 +1,28 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import tablib
+import requests
 from bs4 import BeautifulSoup
 from django.test import TestCase
 
 from pathology.models import CrawlJob, Organ, Specimen
+from pathology.resources import OrganResource, SpecimenResource
 from pathology.services.crawler import CAPCrawler, PathologyOutlinesCrawler, SourceUnavailable
-from pathology.services.jobs import CrawlJobService, start_default_job_if_needed
-from pathology.services.documents import _extract_laterality, _extract_site_name
+from pathology.services.jobs import (
+    CrawlJobRunner,
+    CrawlJobService,
+    mark_stale_running_jobs,
+    start_default_job_if_needed,
+)
+from pathology.services.documents import (
+    _extract_laterality,
+    _extract_procedure_name,
+    _extract_site_name,
+)
 from pathology.services.normalizers import (
     build_specimen_name,
+    infer_clinical_flags,
     infer_organ_name,
     normalize_specimen_size,
     normalize_specimen_type,
@@ -99,6 +112,33 @@ class NormalizerTests(TestCase):
             "Right; Left; Not specified",
         )
 
+    def test_extract_procedure_name_collects_procedure_options(self):
+        content = "\n".join(
+            [
+                "Procedure",
+                "___ Excision",
+                "___ Core needle biopsy",
+                "Tumor Site",
+            ]
+        )
+        self.assertEqual(
+            _extract_procedure_name(content),
+            "Excision; Core needle biopsy",
+        )
+
+    def test_clinical_flags_capture_procedure_and_applicability(self):
+        flags = infer_clinical_flags(
+            "Breast biomarker reporting",
+            "Core needle biopsy",
+            "IHC and HER2 FISH molecular testing",
+        )
+
+        self.assertTrue(flags["is_biopsy"])
+        self.assertFalse(flags["is_resection"])
+        self.assertTrue(flags["is_histopathology"])
+        self.assertTrue(flags["is_ihc_applicable"])
+        self.assertTrue(flags["is_molecular_applicable"])
+
 
 class CrawlerParsingTests(TestCase):
     def test_parser_prefers_current_version_links_from_live_page_structure(self):
@@ -175,6 +215,10 @@ class CrawlerParsingTests(TestCase):
                 </ul>
                 <h2>Treatment</h2>
                 <p>Colectomy specimen</p>
+                <h2>Positive stains</h2>
+                <ul><li>CK20</li></ul>
+                <h2>Molecular / cytogenetics</h2>
+                <p>KRAS mutation testing may be performed.</p>
             </body>
         </html>
         """
@@ -190,6 +234,10 @@ class CrawlerParsingTests(TestCase):
         self.assertEqual(parsed.organ_name, "Colon")
         self.assertEqual(parsed.site_name, "Ascending colon; Transverse colon")
         self.assertEqual(parsed.source_site, "pathologyoutlines.com")
+        self.assertEqual(parsed.procedure_name, "Colectomy specimen")
+        self.assertTrue(parsed.is_resection)
+        self.assertTrue(parsed.is_ihc_applicable)
+        self.assertTrue(parsed.is_molecular_applicable)
         self.assertIn("Colon", parsed.specimen_name)
 
     def test_pathology_outlines_chapter_parser_collects_unique_topic_links(self):
@@ -215,6 +263,19 @@ class CrawlerParsingTests(TestCase):
             ],
         )
 
+    @patch("pathology.services.crawler.requests.get")
+    def test_pathology_outlines_fetch_raises_source_unavailable_for_rate_limit(
+        self,
+        mock_get,
+    ):
+        response = requests.Response()
+        response.status_code = 429
+        response.url = "https://www.pathologyoutlines.com/sitemap.xml"
+        mock_get.return_value = response
+
+        with self.assertRaises(SourceUnavailable):
+            PathologyOutlinesCrawler()._fetch_html(response.url)
+
 
 class PipelinePersistenceTests(TestCase):
     def test_upsert_uses_source_file_for_idempotency(self):
@@ -226,6 +287,9 @@ class PipelinePersistenceTests(TestCase):
             laterality="Right",
             specimen_type="Resection",
             specimen_size="3.2 cm",
+            procedure_name="Excision",
+            is_resection=True,
+            is_histopathology=True,
             source_site="cap.org",
             source_file=Path("data/breast/breast_invasive_resection.pdf"),
         )
@@ -236,6 +300,9 @@ class PipelinePersistenceTests(TestCase):
             laterality="Right",
             specimen_type="Resection",
             specimen_size="3.2 cm",
+            procedure_name="Core needle biopsy",
+            is_biopsy=True,
+            is_histopathology=True,
             source_site="cap.org",
             source_file=Path("data/breast/breast_invasive_resection.docx"),
         )
@@ -253,6 +320,8 @@ class PipelinePersistenceTests(TestCase):
         self.assertEqual(Specimen.objects.get().site_name, "Upper outer quadrant")
         self.assertEqual(Specimen.objects.get().laterality, "Right")
         self.assertEqual(Specimen.objects.get().source_site, "cap.org")
+        self.assertEqual(Specimen.objects.get().procedure_name, "Core needle biopsy")
+        self.assertTrue(Specimen.objects.get().is_biopsy)
 
     @patch("pathology.services.pipeline.parse_document")
     def test_pipeline_inserts_while_crawl_is_running(self, mock_parse_document):
@@ -370,6 +439,13 @@ class PipelinePersistenceTests(TestCase):
         mock_ensure.side_effect = SourceUnavailable("blocked")
         mock_collect.return_value = []
         pipeline = ProtocolIngestionPipeline(crawler=CAPCrawler())
+        pipeline._run_cached_cap_ingestion = lambda **kwargs: {
+            "links": 0,
+            "files": 0,
+            "created": 0,
+            "updated": 0,
+            "skipped": 0,
+        }
 
         summary = pipeline.run(crawl_source="both")
 
@@ -402,6 +478,43 @@ class PipelinePersistenceTests(TestCase):
         self.assertEqual(summary["files"], 1)
         self.assertEqual(Specimen.objects.count(), 1)
         self.assertEqual(Specimen.objects.get().source_site, "pathologyoutlines.com")
+        self.assertEqual(
+            Specimen.objects.get().source_file,
+            "pathologyoutlines/topic/colonadenocarcinoma.html",
+        )
+
+    def test_pathology_outlines_upsert_refreshes_existing_html_record(self):
+        organ = Organ.objects.create(name="Colon")
+        Specimen.objects.create(
+            organ=organ,
+            specimen_name="Old colon specimen",
+            site_name="Colon",
+            laterality="",
+            specimen_type="Unknown",
+            specimen_size="",
+            source_site="pathologyoutlines.com",
+            source_file="pathologyoutlines/topic/colonadenocarcinoma.html",
+        )
+        parsed = ParsedSpecimenData(
+            specimen_name="Colon adenocarcinoma resection specimen",
+            organ_name="Colon",
+            site_name="Ascending colon",
+            laterality="Right",
+            specimen_type="Resection",
+            specimen_size="Large",
+            source_site="pathologyoutlines.com",
+            source_file=Path("pathologyoutlines/topic/colonadenocarcinoma.html"),
+        )
+
+        result = ProtocolIngestionPipeline(crawler=None)._upsert_specimen(parsed)
+
+        self.assertEqual(result, "updated")
+        specimen = Specimen.objects.get(
+            source_file="pathologyoutlines/topic/colonadenocarcinoma.html"
+        )
+        self.assertEqual(specimen.specimen_name, "Colon adenocarcinoma resection specimen")
+        self.assertEqual(specimen.site_name, "Ascending colon")
+        self.assertEqual(specimen.laterality, "Right")
 
 
 class CrawlJobTests(TestCase):
@@ -429,6 +542,56 @@ class CrawlJobTests(TestCase):
         self.assertTrue(job.stop_requested)
         self.assertEqual(job.status, CrawlJob.Status.STOP_REQUESTED)
 
+    @patch("pathology.services.jobs._process_is_running", return_value=False)
+    def test_stale_running_job_is_marked_failed(self, mock_process_is_running):
+        job = CrawlJob.objects.create(
+            name="Stale Crawl",
+            status=CrawlJob.Status.RUNNING,
+            process_id=999999,
+        )
+
+        marked = mark_stale_running_jobs()
+
+        job.refresh_from_db()
+        self.assertEqual(marked, 1)
+        self.assertEqual(job.status, CrawlJob.Status.FAILED)
+        self.assertIsNone(job.process_id)
+        self.assertIn("process ended", job.error_message)
+
+    @patch("pathology.services.jobs._process_is_running", return_value=False)
+    @patch("pathology.services.jobs.subprocess.Popen")
+    def test_start_job_restarts_stale_running_job(
+        self,
+        mock_popen,
+        mock_process_is_running,
+    ):
+        mock_popen.return_value.pid = 4321
+        job = CrawlJob.objects.create(
+            name="Stale Crawl",
+            status=CrawlJob.Status.RUNNING,
+            process_id=999999,
+        )
+
+        CrawlJobService().start_job(job)
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, CrawlJob.Status.PENDING)
+        self.assertEqual(job.process_id, 4321)
+
+    @patch("pathology.services.jobs.os.getpid", return_value=123456)
+    def test_runner_mark_running_refreshes_process_id(self, mock_getpid):
+        job = CrawlJob.objects.create(
+            name="PID Refresh Crawl",
+            status=CrawlJob.Status.PENDING,
+            process_id=999999,
+        )
+
+        CrawlJobRunner(job)._mark_running()
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, CrawlJob.Status.RUNNING)
+        self.assertEqual(job.process_id, 123456)
+
     @patch("pathology.services.jobs.CrawlJobService.start_job")
     def test_auto_start_creates_unlimited_default_job_when_empty(self, mock_start_job):
         mock_start_job.side_effect = lambda job: job
@@ -436,10 +599,10 @@ class CrawlJobTests(TestCase):
         job = start_default_job_if_needed()
 
         self.assertIsNotNone(job)
-        created_job = CrawlJob.objects.get(name="Automatic CAP Crawl")
+        created_job = CrawlJob.objects.get(name="Automatic Pathology Crawl")
         self.assertIsNone(created_job.limit)
         self.assertTrue(created_job.destination_dir.endswith("/data"))
-        self.assertEqual(created_job.crawl_source, "cap.org")
+        self.assertEqual(created_job.crawl_source, "both")
         mock_start_job.assert_called_once_with(created_job)
 
     @patch("pathology.services.jobs.CrawlJobService.start_job")
@@ -462,6 +625,26 @@ class CrawlJobTests(TestCase):
 
         self.assertIsNone(job)
         mock_start_job.assert_not_called()
+
+    @patch("pathology.services.jobs.CrawlJobService.start_job")
+    def test_auto_start_reuses_legacy_default_job(self, mock_start_job):
+        mock_start_job.side_effect = lambda job: job
+        legacy_job = CrawlJob.objects.create(
+            name="Automatic CAP Crawl",
+            status=CrawlJob.Status.PENDING,
+            crawl_source=CrawlJob.SourceChoices.CAP,
+            destination_dir="",
+            limit=5,
+        )
+
+        job = start_default_job_if_needed()
+
+        self.assertEqual(job.pk, legacy_job.pk)
+        job.refresh_from_db()
+        self.assertEqual(job.name, "Automatic Pathology Crawl")
+        self.assertIsNone(job.limit)
+        self.assertEqual(job.crawl_source, "both")
+        self.assertTrue(job.destination_dir.endswith("/data"))
 
 
 class KeysetPaginationTests(TestCase):
@@ -491,3 +674,90 @@ class KeysetPaginationTests(TestCase):
         )
         self.assertEqual(len(second.items), 2)
         self.assertTrue(second.has_prev)
+
+
+class ImportExportTests(TestCase):
+    def setUp(self):
+        self.breast = Organ.objects.create(name="Breast")
+        self.thyroid = Organ.objects.create(name="Thyroid")
+        Specimen.objects.create(
+            organ=self.breast,
+            specimen_name="Breast Invasive Carcinoma",
+            site_name="Upper outer quadrant",
+            laterality="Right",
+            specimen_type="Resection",
+            specimen_size="3.2 cm",
+            source_site="cap.org",
+            source_file="breast/breast_invasive_resection.docx",
+        )
+        Specimen.objects.create(
+            organ=self.thyroid,
+            specimen_name="Thyroid Carcinoma",
+            site_name="Thyroid",
+            laterality="",
+            specimen_type="Resection",
+            specimen_size="2.0 cm",
+            source_site="cap.org",
+            source_file="endocrine/thyroid.docx",
+        )
+
+    def test_specimen_resource_export_csv(self):
+        resource = SpecimenResource()
+        dataset = resource.export(Specimen.objects.all())
+        csv_data = dataset.export("csv")
+        self.assertIn("Breast Invasive Carcinoma", csv_data)
+        self.assertIn("Thyroid Carcinoma", csv_data)
+        self.assertIn("Breast", csv_data)
+
+    def test_specimen_resource_export_xlsx(self):
+        resource = SpecimenResource()
+        dataset = resource.export(Specimen.objects.all())
+        xlsx_data = dataset.export("xlsx")
+        self.assertTrue(len(xlsx_data) > 0)
+
+    def test_specimen_resource_import_csv(self):
+        resource = SpecimenResource()
+        csv_data = (
+            "Organ Name,specimen_name,site_name,laterality,specimen_type,"
+            "specimen_size,source_site,source_file\n"
+            "Breast,Breast DCIS,Upper outer quadrant,Right,Biopsy,Small,"
+            "cap.org,breast/breast_dcis_biopsy.docx\n"
+        )
+        dataset = tablib.Dataset().load(csv_data, format="csv")
+        result = resource.import_data(dataset, dry_run=False)
+        self.assertEqual(result.total_rows, 1)
+        self.assertEqual(
+            Specimen.objects.filter(specimen_name="Breast DCIS").count(), 1
+        )
+
+    def test_specimen_resource_import_xlsx(self):
+        resource = SpecimenResource()
+        csv_data = (
+            "Organ Name,specimen_name,site_name,laterality,specimen_type,"
+            "specimen_size,source_site,source_file\n"
+            "Thyroid,Thyroid FNA,Thyroid,,Biopsy,Small,"
+            "cap.org,endocrine/thyroid_biopsy.docx\n"
+        )
+        dataset = tablib.Dataset().load(csv_data, format="csv")
+        xlsx_data = dataset.export("xlsx")
+        dataset = tablib.Dataset().load(xlsx_data, format="xlsx")
+        result = resource.import_data(dataset, dry_run=False)
+        self.assertEqual(result.total_rows, 1)
+        self.assertEqual(
+            Specimen.objects.filter(specimen_name="Thyroid FNA").count(), 1
+        )
+
+    def test_organ_resource_export_csv(self):
+        resource = OrganResource()
+        dataset = resource.export(Organ.objects.all())
+        csv_data = dataset.export("csv")
+        self.assertIn("Breast", csv_data)
+        self.assertIn("Thyroid", csv_data)
+
+    def test_organ_resource_import_csv(self):
+        resource = OrganResource()
+        csv_data = "id,name\n,Testis\n"
+        dataset = tablib.Dataset().load(csv_data, format="csv")
+        result = resource.import_data(dataset, dry_run=False)
+        self.assertEqual(result.total_rows, 1)
+        self.assertEqual(Organ.objects.filter(name="Testis").count(), 1)

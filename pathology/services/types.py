@@ -23,3 +23,10 @@ class ParsedSpecimenData:
     specimen_size: str
     source_site: str
     source_file: Path
+    procedure_name: str = ""
+    is_biopsy: bool = False
+    is_resection: bool = False
+    is_cytology: bool = False
+    is_histopathology: bool = False
+    is_ihc_applicable: bool = False
+    is_molecular_applicable: bool = False

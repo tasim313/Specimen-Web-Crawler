@@ -27,7 +27,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--source",
             type=str,
-            default=CrawlJob.SourceChoices.CAP,
+            default=CrawlJob.SourceChoices.BOTH,
             choices=CrawlJob.SourceChoices.values,
             help="Which upstream source to crawl.",
         )
@@ -39,6 +39,6 @@ class Command(BaseCommand):
             destination_root=destination,
             crawl_source=options["source"],
         )
-        self.stdout.write(self.style.SUCCESS("CAP protocol import completed."))
+        self.stdout.write(self.style.SUCCESS("Pathology protocol import completed."))
         for key, value in summary.items():
             self.stdout.write(f"{key}: {value}")
