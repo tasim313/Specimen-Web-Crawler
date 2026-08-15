@@ -7,8 +7,11 @@ from django.http import HttpResponse
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils.html import format_html
+from import_export.admin import ImportExportModelAdmin
+from import_export.formats import base_formats
 
 from .models import CrawlJob, Organ, Specimen
+from .resources import OrganResource, SpecimenResource
 from .services.jobs import CrawlJobService
 from .services.pagination import paginate_keyset
 
@@ -27,6 +30,13 @@ def export_specimens_to_csv(modeladmin, request, queryset):
             "Laterality",
             "Specimen Type",
             "Specimen Size",
+            "Procedure Name",
+            "Is Biopsy",
+            "Is Resection",
+            "Is Cytology",
+            "Is Histopathology",
+            "Is IHC Applicable",
+            "Is Molecular Applicable",
             "Source Site",
         ]
     )
@@ -40,6 +50,13 @@ def export_specimens_to_csv(modeladmin, request, queryset):
                 specimen.laterality,
                 specimen.specimen_type,
                 specimen.specimen_size or "",
+                specimen.procedure_name,
+                specimen.is_biopsy,
+                specimen.is_resection,
+                specimen.is_cytology,
+                specimen.is_histopathology,
+                specimen.is_ihc_applicable,
+                specimen.is_molecular_applicable,
                 specimen.source_site,
             ]
         )
@@ -48,9 +65,11 @@ def export_specimens_to_csv(modeladmin, request, queryset):
 
 
 @admin.register(Organ)
-class OrganAdmin(admin.ModelAdmin):
+class OrganAdmin(ImportExportModelAdmin):
     list_display = ("name", "specimen_count")
     search_fields = ("name",)
+    resource_class = OrganResource
+    formats = (base_formats.CSV, base_formats.XLSX)
 
     @admin.display(description="Specimens")
     def specimen_count(self, obj):
@@ -58,23 +77,49 @@ class OrganAdmin(admin.ModelAdmin):
 
 
 @admin.register(Specimen)
-class SpecimenAdmin(admin.ModelAdmin):
+class SpecimenAdmin(ImportExportModelAdmin):
     list_display = (
         "specimen_name",
         "organ",
         "site_name",
         "laterality",
         "specimen_type",
+        "procedure_name",
+        "is_biopsy",
+        "is_resection",
+        "is_cytology",
+        "is_histopathology",
+        "is_ihc_applicable",
+        "is_molecular_applicable",
         "source_site",
         "specimen_size",
         "source_file",
         "created_at",
     )
-    search_fields = ("specimen_name", "site_name", "laterality", "organ__name", "source_site")
-    list_filter = ("specimen_type", "organ", "source_site")
+    search_fields = (
+        "specimen_name",
+        "site_name",
+        "laterality",
+        "procedure_name",
+        "organ__name",
+        "source_site",
+    )
+    list_filter = (
+        "specimen_type",
+        "organ",
+        "source_site",
+        "is_biopsy",
+        "is_resection",
+        "is_cytology",
+        "is_histopathology",
+        "is_ihc_applicable",
+        "is_molecular_applicable",
+    )
     autocomplete_fields = ("organ",)
     actions = (export_specimens_to_csv,)
     change_list_template = "admin/pathology/specimen/change_list.html"
+    resource_class = SpecimenResource
+    formats = (base_formats.CSV, base_formats.XLSX)
 
     def get_urls(self):
         urls = super().get_urls()

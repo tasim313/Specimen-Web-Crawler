@@ -16,11 +16,52 @@ from .pipeline import CrawlStopped, ProtocolIngestionPipeline
 
 logger = logging.getLogger("pathology.jobs")
 
+LEGACY_AUTO_START_JOB_NAMES = ("Automatic CAP Crawl",)
+
+
+def _process_is_running(process_id: int | None) -> bool:
+    if not process_id:
+        return False
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def mark_stale_running_jobs() -> int:
+    stale_jobs = []
+    for job in CrawlJob.objects.filter(status=CrawlJob.Status.RUNNING):
+        if not _process_is_running(job.process_id):
+            job.status = CrawlJob.Status.FAILED
+            job.error_message = "Crawler process ended before updating job status."
+            job.finished_at = timezone.now()
+            job.process_id = None
+            stale_jobs.append(job)
+
+    for job in stale_jobs:
+        job.save(
+            update_fields=["status", "error_message", "finished_at", "process_id"]
+        )
+        logger.warning("Marked stale crawl job %s as failed", job.pk)
+
+    return len(stale_jobs)
+
 
 class CrawlJobService:
     def start_job(self, job: CrawlJob) -> CrawlJob:
         if job.status == CrawlJob.Status.RUNNING:
-            return job
+            if _process_is_running(job.process_id):
+                return job
+            job.status = CrawlJob.Status.FAILED
+            job.error_message = "Crawler process ended before updating job status."
+            job.finished_at = timezone.now()
+            job.process_id = None
+            job.save(
+                update_fields=["status", "error_message", "finished_at", "process_id"]
+            )
 
         job.stop_requested = False
         job.error_message = ""
@@ -31,7 +72,7 @@ class CrawlJobService:
         with log_path.open("ab") as log_handle:
             process = subprocess.Popen(
                 [
-                    sys.executable,
+                    getattr(settings, "CRAWL_JOB_PYTHON", sys.executable),
                     "manage.py",
                     "run_crawl_job",
                     "--job-id",
@@ -64,26 +105,42 @@ def start_default_job_if_needed() -> CrawlJob | None:
         return None
 
     try:
+        mark_stale_running_jobs()
         if CrawlJob.objects.filter(status=CrawlJob.Status.RUNNING).exists():
             return None
 
-        job, _ = CrawlJob.objects.get_or_create(
-            name=settings.CAP_AUTO_START_JOB_NAME,
-            defaults={
-                "limit": None,
-                "destination_dir": str(settings.DATA_DIR),
-            },
+        auto_job_names = (
+            settings.CAP_AUTO_START_JOB_NAME,
+            *LEGACY_AUTO_START_JOB_NAMES,
         )
+        job = (
+            CrawlJob.objects.filter(name__in=auto_job_names)
+            .order_by("-created_at")
+            .first()
+        )
+        if job is None:
+            job = CrawlJob.objects.create(
+                name=settings.CAP_AUTO_START_JOB_NAME,
+                limit=None,
+                destination_dir=str(settings.DATA_DIR),
+                crawl_source=CrawlJob.SourceChoices.BOTH,
+            )
     except (OperationalError, ProgrammingError):
         return None
 
     updates: list[str] = []
+    if job.name != settings.CAP_AUTO_START_JOB_NAME:
+        job.name = settings.CAP_AUTO_START_JOB_NAME
+        updates.append("name")
     if job.limit is not None:
         job.limit = None
         updates.append("limit")
     if not job.destination_dir:
         job.destination_dir = str(settings.DATA_DIR)
         updates.append("destination_dir")
+    if job.crawl_source == CrawlJob.SourceChoices.CAP:
+        job.crawl_source = CrawlJob.SourceChoices.BOTH
+        updates.append("crawl_source")
     if updates:
         job.save(update_fields=updates)
 
@@ -160,8 +217,7 @@ class CrawlJobRunner:
         self.job.started_at = timezone.now()
         self.job.finished_at = None
         self.job.error_message = ""
-        if not self.job.process_id:
-            self.job.process_id = os.getpid()
+        self.job.process_id = os.getpid()
         self.job.save(
             update_fields=["status", "started_at", "finished_at", "error_message", "process_id"]
         )

@@ -15,7 +15,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--source",
             type=str,
-            default=CrawlJob.SourceChoices.CAP,
+            default=CrawlJob.SourceChoices.BOTH,
             choices=CrawlJob.SourceChoices.values,
         )
 

@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'import_export',
     'pathology',
 ]
 
@@ -132,7 +133,13 @@ PATHOLOGY_OUTLINES_SITEMAP_URL = "https://www.pathologyoutlines.com/sitemap.xml"
 CAP_AUTO_START_ENABLED = os.environ.get("CAP_AUTO_START_ENABLED", "1") == "1"
 CAP_AUTO_START_JOB_NAME = os.environ.get(
     "CAP_AUTO_START_JOB_NAME",
-    "Automatic CAP Crawl",
+    "Automatic Pathology Crawl",
+)
+CRAWL_JOB_PYTHON = os.environ.get(
+    "CRAWL_JOB_PYTHON",
+    str(BASE_DIR / ".venv" / "bin" / "python")
+    if (BASE_DIR / ".venv" / "bin" / "python").exists()
+    else os.sys.executable,
 )
 
 LOGGING = {

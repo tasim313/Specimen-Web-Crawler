@@ -26,6 +26,13 @@ class Specimen(models.Model):
     laterality = models.CharField(max_length=255, blank=True)
     specimen_type = models.CharField(max_length=100)
     specimen_size = models.TextField(blank=True, null=True)
+    procedure_name = models.CharField(max_length=255, blank=True)
+    is_biopsy = models.BooleanField(default=False)
+    is_resection = models.BooleanField(default=False)
+    is_cytology = models.BooleanField(default=False)
+    is_histopathology = models.BooleanField(default=False)
+    is_ihc_applicable = models.BooleanField(default=False)
+    is_molecular_applicable = models.BooleanField(default=False)
     source_site = models.CharField(
         max_length=64,
         choices=SourceSite.choices,
@@ -70,7 +77,7 @@ class CrawlJob(models.Model):
     crawl_source = models.CharField(
         max_length=64,
         choices=SourceChoices.choices,
-        default=SourceChoices.CAP,
+        default=SourceChoices.BOTH,
     )
     status = models.CharField(
         max_length=20,

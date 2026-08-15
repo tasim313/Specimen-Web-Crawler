@@ -84,6 +84,110 @@ def normalize_specimen_size(text: str, specimen_type: str, organ_name: str) -> s
     return ""
 
 
+def infer_clinical_flags(*values: str) -> dict[str, bool]:
+    haystack = "\n".join(value or "" for value in values).lower()
+    is_cytology = any(
+        term in haystack
+        for term in (
+            "cytology",
+            "cytologic",
+            "fine needle aspiration",
+            "fna",
+            "smear",
+            "washing",
+            "brushing",
+            "fluid",
+        )
+    )
+    is_biopsy = any(
+        term in haystack
+        for term in (
+            "biopsy",
+            "core needle",
+            "needle core",
+            "punch",
+            "curettage",
+        )
+    )
+    is_resection = any(
+        term in haystack
+        for term in (
+            "resection",
+            "excision",
+            "ectomy",
+            "colectomy",
+            "mastectomy",
+            "hysterectomy",
+            "orchiectomy",
+            "appendectomy",
+            "cholecystectomy",
+            "lymphadenectomy",
+            "polypectomy",
+        )
+    )
+    is_ihc_applicable = any(
+        term in haystack
+        for term in (
+            "ihc",
+            "immunohistochemistry",
+            "immunohistochemical",
+            "immunostain",
+            "positive stains",
+            "negative stains",
+            "stain",
+        )
+    )
+    is_molecular_applicable = any(
+        term in haystack
+        for term in (
+            "molecular",
+            "biomarker",
+            "gene",
+            "mutation",
+            "sequencing",
+            "ngs",
+            "fish",
+            "pcr",
+            "msi",
+            "mismatch repair",
+            "her2",
+            "alk",
+            "ros1",
+            "egfr",
+            "braf",
+            "kras",
+            "nras",
+        )
+    )
+    is_histopathology = (
+        not is_cytology
+        and (
+            is_biopsy
+            or is_resection
+            or any(
+                term in haystack
+                for term in (
+                    "histology",
+                    "histologic",
+                    "histopathology",
+                    "microscopic",
+                    "gross description",
+                    "tumor site",
+                )
+            )
+        )
+    )
+
+    return {
+        "is_biopsy": is_biopsy,
+        "is_resection": is_resection,
+        "is_cytology": is_cytology,
+        "is_histopathology": is_histopathology,
+        "is_ihc_applicable": is_ihc_applicable,
+        "is_molecular_applicable": is_molecular_applicable,
+    }
+
+
 def infer_organ_name(specimen_name: str, fallback: str = "", source_stem: str = "") -> str:
     haystack = f"{specimen_name} {source_stem} {fallback}".lower()
     for keyword, normalized in sorted(

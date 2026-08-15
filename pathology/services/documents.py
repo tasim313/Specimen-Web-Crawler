@@ -8,6 +8,7 @@ from .constants import SECTION_HEADINGS, SIZE_PATTERN
 from .normalizers import (
     build_specimen_name,
     clean_whitespace,
+    infer_clinical_flags,
     infer_organ_name,
     infer_specimen_type,
     normalize_specimen_size,
@@ -37,6 +38,7 @@ def parse_document(file_path: Path, category: str) -> ParsedSpecimenData | None:
 
     raw_specimen_name = _extract_specimen_name(content, file_path)
     procedure_block = _extract_section(content, "procedure")
+    procedure_name = _extract_procedure_name(procedure_block)
     size_context = "\n".join(
         part
         for part in (
@@ -70,6 +72,13 @@ def parse_document(file_path: Path, category: str) -> ParsedSpecimenData | None:
         specimen_type,
         organ_name,
     ) or _extract_size(size_context)
+    clinical_flags = infer_clinical_flags(
+        raw_specimen_name,
+        procedure_name,
+        procedure_block,
+        specimen_type,
+        content[:6000],
+    )
 
     return ParsedSpecimenData(
         specimen_name=specimen_name,
@@ -80,6 +89,8 @@ def parse_document(file_path: Path, category: str) -> ParsedSpecimenData | None:
         specimen_size=specimen_size,
         source_site="cap.org",
         source_file=file_path,
+        procedure_name=procedure_name,
+        **clinical_flags,
     )
 
 
@@ -175,6 +186,20 @@ def _extract_section(content: str, heading: str) -> str:
 def _extract_size(content: str) -> str:
     match = re.search(SIZE_PATTERN, content, flags=re.IGNORECASE)
     return match.group(0) if match else ""
+
+
+def _extract_procedure_name(procedure_block: str) -> str:
+    lines = [clean_whitespace(line) for line in procedure_block.splitlines()]
+    options = _extract_option_values(lines, "procedure", max_options=12)
+    if options:
+        return "; ".join(options)
+
+    for line in lines:
+        cleaned = re.sub(r"^procedure\s*:?\s*", "", line, flags=re.IGNORECASE)
+        cleaned = clean_whitespace(cleaned).strip(" :")
+        if cleaned and cleaned.lower() != "procedure":
+            return cleaned[:255]
+    return ""
 
 
 def _extract_site_name(content: str, organ_name: str) -> str:
